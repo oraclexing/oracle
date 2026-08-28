@@ -134,6 +134,12 @@ Debug note: when you have a live ChatGPT tab open under a DevTools port and need
 - Remember: the browser composer now pastes only the user prompt (plus any inline file blocks). If you see the default “You are Oracle…” text or other system-prefixed content in the ChatGPT composer, something regressed in `assembleBrowserPrompt` and you should stop and file a bug.
 - Heartbeats: Browser runs emit `--heartbeat` status while waiting. Long Thinking/Pro runs should show `[browser] ChatGPT thinking ...` or `[browser] Waiting for ChatGPT response ...`; the log must not include reasoning text from the side panel.
 
+4b. **ChatGPT image generation with a reference image**
+
+- Run `oracle --engine browser --browser-manual-login --model gpt-5.6-sol --browser-thinking-time light --browser-attachments always --file /tmp/reference.png --generate-image /tmp/oracle-image-smoke.png --prompt "Generate a simple square image based on the reference."`.
+- Confirm the session runtime records `promptSubmitted: true`, ChatGPT shows the submitted user turn (not a prompt left in the composer), and `/tmp/oracle-image-smoke.png` is a valid downloaded image.
+- If the send-button click is a no-op, expect `Send click left the prompt staged; submitting once via Enter` before the user turn appears.
+
 ## Post-Run Validation
 
 - `oracle session <id>` should replay the transcript with markdown.

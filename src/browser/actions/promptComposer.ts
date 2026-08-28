@@ -5,6 +5,7 @@ import {
   PROMPT_FALLBACK_SELECTOR,
   SEND_BUTTON_SELECTORS,
   STOP_BUTTON_SELECTOR,
+  STOP_BUTTON_SELECTORS,
   ASSISTANT_ROLE_SELECTOR,
 } from "../constants.js";
 import {
@@ -235,18 +236,107 @@ export async function submitPrompt(
     logger("Submitted prompt via Enter key");
   } else {
     logger("Clicked send button");
+    await submitStagedPromptViaEnter(
+      runtime,
+      input,
+      prompt,
+      deps.baselineTurns ?? undefined,
+      logger,
+    );
   }
-  await deps.onPromptSubmitted?.();
 
   const commitTimeoutMs = Math.max(60_000, deps.inputTimeoutMs ?? 0);
   // Learned: the send button can succeed but the turn doesn't appear immediately; verify commit via turns/stop button.
-  return await verifyPromptCommitted(
+  const committedTurns = await verifyPromptCommitted(
     runtime,
     prompt,
     commitTimeoutMs,
     logger,
     deps.baselineTurns ?? undefined,
   );
+  // A click is only an attempt: persist promptSubmitted after ChatGPT exposes
+  // the user turn so no-op controls cannot make an unsubmitted session look live.
+  await deps.onPromptSubmitted?.();
+  return committedTurns;
+}
+
+async function submitStagedPromptViaEnter(
+  Runtime: ChromeClient["Runtime"],
+  Input: ChromeClient["Input"],
+  prompt: string,
+  baselineTurns: number | undefined,
+  logger: BrowserLogger,
+): Promise<boolean> {
+  // ChatGPT can leave the composer untouched after a trusted click, especially
+  // when an image attachment is present. Give the click a chance to commit, then
+  // use Enter only while the same prompt is still staged and no generation/turn
+  // signal has appeared. ProseMirror inserts extra paragraph newlines, so compare
+  // canonical whitespace rather than raw innerText.
+  await delay(750);
+  const normalizedPrompt = prompt.replace(/\s+/gu, " ").trim();
+  const normalizedPromptLiteral = JSON.stringify(normalizedPrompt);
+  const inputSelectorsLiteral = JSON.stringify(INPUT_SELECTORS);
+  const stopSelectorsLiteral = JSON.stringify(STOP_BUTTON_SELECTORS);
+  const baselineLiteral =
+    typeof baselineTurns === "number" && Number.isFinite(baselineTurns)
+      ? Math.max(0, Math.floor(baselineTurns))
+      : -1;
+  const outcome = await Runtime.evaluate({
+    expression: `(() => {
+      const selectors = ${inputSelectorsLiteral};
+      const stopSelectors = ${stopSelectorsLiteral};
+      const normalize = (value) => String(value ?? '').replace(/\\s+/gu, ' ').trim();
+      const isVisible = (node) => {
+        if (!(node instanceof HTMLElement)) return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const readValue = (node) => {
+        if (node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement) {
+          return node.value ?? '';
+        }
+        return node.innerText ?? node.textContent ?? '';
+      };
+      const candidates = selectors
+        .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+        .filter(isVisible);
+      const editor = candidates.find(
+        (node) => normalize(readValue(node)) === ${normalizedPromptLiteral},
+      ) ?? null;
+      const stopVisible = stopSelectors.some((selector) =>
+        Array.from(document.querySelectorAll(selector)).some(isVisible),
+      );
+      const turns = ${buildConversationTurnListExpression()};
+      const baseline = ${baselineLiteral};
+      const hasNewTurn = baseline >= 0 && turns.length > baseline;
+      if (!(editor instanceof HTMLElement) || stopVisible || hasNewTurn) {
+        return { staged: false, focused: false, stopVisible, hasNewTurn };
+      }
+      editor.focus();
+      return {
+        staged: true,
+        focused: document.activeElement === editor,
+        stopVisible,
+        hasNewTurn,
+      };
+    })()`,
+    returnByValue: true,
+  }).catch(() => null);
+  if (!outcome?.result?.value?.staged || !outcome.result.value.focused) {
+    return false;
+  }
+  logger("Send click left the prompt staged; submitting once via Enter");
+  await Input.dispatchKeyEvent({
+    type: "keyDown",
+    ...ENTER_KEY_EVENT,
+    text: ENTER_KEY_TEXT,
+    unmodifiedText: ENTER_KEY_TEXT,
+  });
+  await Input.dispatchKeyEvent({
+    type: "keyUp",
+    ...ENTER_KEY_EVENT,
+  });
+  return true;
 }
 
 export async function clearPromptComposer(Runtime: ChromeClient["Runtime"], logger: BrowserLogger) {
@@ -940,5 +1030,6 @@ function summarizeCommitProbe(probe: CommitProbeState): Record<string, unknown> 
 export const __test__ = {
   attemptSendButton,
   sendButtonTimeoutMs,
+  submitStagedPromptViaEnter,
   verifyPromptCommitted,
 };

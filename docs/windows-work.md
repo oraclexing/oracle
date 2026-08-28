@@ -12,3 +12,4 @@ Read this file whenever you're working from Windows and add new findings so the 
 Future Windows gotchas belong here. Update this doc when you learn something new.
 
 - ChatGPT sidebar/history labels can include phrases like "Login setup instruction"; login probes must match exact auth CTAs, not any visible text starting with login, or manual-login automation loops forever before typing.
+- On the Windows ChatGPT home composer, a reference-image upload can leave the prompt staged even after a trusted click on the visible enabled `data-testid="send-button"`. An Enter fallback must compare canonical whitespace because ProseMirror inserts extra paragraph newlines; gate the fallback on no new turn/no stop control, and record `promptSubmitted` only after the user turn is observable.

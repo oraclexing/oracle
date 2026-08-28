@@ -242,7 +242,7 @@ describe("promptComposer", () => {
     expect(promptComposer.sendButtonTimeoutMs(["oracle-attach-verify.txt"], 120_000)).toBe(120_000);
   });
 
-  test("marks prompt submitted before commit verification finishes", async () => {
+  test("marks prompt submitted after commit verification succeeds", async () => {
     const onPromptSubmitted = vi.fn();
     const runtime = {
       evaluate: vi.fn(async ({ expression }: { expression: string }) => {
@@ -260,6 +260,7 @@ describe("promptComposer", () => {
         if (expression.includes("button.scrollIntoView")) {
           return { result: { value: { status: "clicked" } } };
         }
+        expect(onPromptSubmitted).not.toHaveBeenCalled();
         return {
           result: {
             value: {
@@ -293,6 +294,71 @@ describe("promptComposer", () => {
     );
 
     expect(onPromptSubmitted).toHaveBeenCalledTimes(1);
+  });
+
+  test("uses Enter when a no-op click leaves a ProseMirror prompt staged with extra newlines", async () => {
+    vi.useFakeTimers();
+    try {
+      let focused = false;
+      class FakeHTMLElement {
+        innerText = "Line 1\n\n\nLine 2";
+        textContent = this.innerText;
+
+        getBoundingClientRect() {
+          return { width: 100, height: 30 };
+        }
+
+        focus() {
+          focused = true;
+        }
+      }
+      class FakeTextAreaElement extends FakeHTMLElement {
+        value = "";
+      }
+      class FakeInputElement extends FakeHTMLElement {
+        value = "";
+      }
+      const editor = new FakeHTMLElement();
+      const document = {
+        get activeElement() {
+          return focused ? editor : null;
+        },
+        querySelectorAll: (selector: string) =>
+          selector === "#prompt-textarea" || selector === ".ProseMirror" ? [editor] : [],
+      };
+      const runtime = {
+        evaluate: vi.fn(async ({ expression }: { expression: string }) => ({
+          result: {
+            value: Function(
+              "document",
+              "HTMLElement",
+              "HTMLTextAreaElement",
+              "HTMLInputElement",
+              `return ${expression};`,
+            )(document, FakeHTMLElement, FakeTextAreaElement, FakeInputElement),
+          },
+        })),
+      };
+      const input = { dispatchKeyEvent: vi.fn() };
+      const logger = Object.assign(vi.fn(), { verbose: false });
+
+      const result = promptComposer.submitStagedPromptViaEnter(
+        runtime as never,
+        input as never,
+        "Line 1\n\nLine 2",
+        0,
+        logger as never,
+      );
+      await vi.advanceTimersByTimeAsync(750);
+
+      await expect(result).resolves.toBe(true);
+      expect(input.dispatchKeyEvent).toHaveBeenCalledTimes(2);
+      expect(logger).toHaveBeenCalledWith(
+        "Send click left the prompt staged; submitting once via Enter",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("waits for a delayed trusted click without issuing a second send", async () => {
