@@ -35,9 +35,15 @@ export interface BrowserTabLeaseRecord {
 export interface BrowserTabLease {
   id: string;
   release: (options?: {
-    onRelease?: (context: { isLastLease: boolean }) => Promise<void>;
+    onRelease?: (context: BrowserTabLeaseReleaseContext) => Promise<void>;
   }) => Promise<void>;
   update: (patch: Partial<BrowserTabLeaseRecord>) => Promise<void>;
+}
+
+export interface BrowserTabLeaseReleaseContext {
+  isLastLease: boolean;
+  releasedLease: BrowserTabLeaseRecord;
+  remainingLeases: readonly BrowserTabLeaseRecord[];
 }
 
 interface BrowserTabLeaseRegistryFile {
@@ -146,12 +152,13 @@ export async function acquireBrowserTabLease(
       );
       let released = false;
       let heartbeatInFlight = false;
+      let heartbeatPromise: Promise<void> | null = null;
       let heartbeatWarningEmitted = false;
       const heartbeat = setInterval(
         () => {
           if (released || heartbeatInFlight) return;
           heartbeatInFlight = true;
-          void updateBrowserTabLease(profileDir, leaseId, {})
+          const heartbeatWork = updateBrowserTabLease(profileDir, leaseId, {})
             .then(() => {
               heartbeatWarningEmitted = false;
             })
@@ -166,7 +173,9 @@ export async function acquireBrowserTabLease(
             })
             .finally(() => {
               heartbeatInFlight = false;
+              if (heartbeatPromise === heartbeatWork) heartbeatPromise = null;
             });
+          heartbeatPromise = heartbeatWork;
         },
         Math.max(10, deps.heartbeatMs ?? LEASE_HEARTBEAT_INTERVAL_MS),
       );
@@ -177,6 +186,7 @@ export async function acquireBrowserTabLease(
           if (released) return;
           released = true;
           clearInterval(heartbeat);
+          await heartbeatPromise?.catch(() => undefined);
           await releaseBrowserTabLease(profileDir, leaseId, options.logger, releaseOptions);
         },
         update: async (patch) => {
@@ -228,7 +238,7 @@ export async function releaseBrowserTabLease(
   profileDir: string,
   leaseId: string,
   logger?: BrowserLogger,
-  options: { onRelease?: (context: { isLastLease: boolean }) => Promise<void> } = {},
+  options: { onRelease?: (context: BrowserTabLeaseReleaseContext) => Promise<void> } = {},
 ): Promise<void> {
   await withRegistryLock(profileDir, async () => {
     const registry = await readRegistry(profileDir);
@@ -236,16 +246,36 @@ export async function releaseBrowserTabLease(
     // controllers here: a transient cross-process liveness false-negative would
     // make this run look like the final lease and allow it to terminate shared
     // Chrome underneath live tabs. Stale records are reclaimed by a later acquire.
-    if (!registry.leases.some((lease) => lease.id === leaseId)) {
+    const releasedLease = registry.leases.find((lease) => lease.id === leaseId);
+    if (!releasedLease) {
       throw new Error(
         `Oracle ChatGPT browser slot ${leaseId.slice(0, 8)} was already lost; refusing final shared-Chrome cleanup.`,
       );
     }
     const leases = registry.leases.filter((lease) => lease.id !== leaseId);
     await writeRegistry(profileDir, { version: 1, leases });
-    await options.onRelease?.({ isLastLease: leases.length === 0 });
+    logger?.(
+      `[browser] ChatGPT browser slot ${leaseId.slice(0, 8)} release decision: ` +
+        `isLastLease=${leases.length === 0}; remaining=${leases.length}; ` +
+        `remainingSessions=${formatRemainingLeaseSessions(leases)}.`,
+    );
+    await options.onRelease?.({
+      isLastLease: leases.length === 0,
+      releasedLease,
+      remainingLeases: leases,
+    });
   });
   logger?.(`[browser] Released ChatGPT browser slot ${leaseId.slice(0, 8)}.`);
+}
+
+function formatRemainingLeaseSessions(leases: readonly BrowserTabLeaseRecord[]): string {
+  if (leases.length === 0) return "none";
+  return leases
+    .map(
+      (lease) =>
+        `${lease.id.slice(0, 8)}:${lease.sessionId ?? "unknown"}:pid${lease.pid}:target${lease.chromeTargetId ?? "pending"}`,
+    )
+    .join(",");
 }
 
 export async function hasOtherActiveBrowserTabLeases(

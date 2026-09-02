@@ -943,6 +943,11 @@ async function releaseLocalBrowserTabLease(options: {
   closeOwnedRunTarget: () => Promise<void>;
   cleanupBlankTabs: () => Promise<void>;
   terminateSharedChrome?: () => Promise<boolean>;
+  sessionId?: string;
+  chromePid?: number;
+  chromePort?: number;
+  chromeTargetId?: string | null;
+  launchDisposition?: "launched" | "reused";
   logger: BrowserLogger;
 }): Promise<{
   keepBrowserOpen: boolean;
@@ -971,6 +976,10 @@ async function releaseLocalBrowserTabLease(options: {
         }
         await options.cleanupBlankTabs().catch(() => undefined);
         if (options.terminateSharedChrome) {
+          options.logger(
+            `[browser] ChatGPT browser slot ${options.lease.id.slice(0, 8)} is final; ` +
+              `terminating shared Chrome (${formatBrowserLeaseDiagnostics(options)}).`,
+          );
           const terminated = await options.terminateSharedChrome().catch(() => false);
           if (terminated) {
             terminationHandled = true;
@@ -1005,7 +1014,9 @@ async function releaseLocalBrowserTabLease(options: {
   }
   if (otherLeasesRemain) {
     options.logger(
-      "[browser] Other ChatGPT tab leases still active; leaving shared Chrome running.",
+      `[browser] Other ChatGPT tab leases still active; leaving shared Chrome running; ` +
+        `browser slot ${options.lease.id.slice(0, 8)} is non-final ` +
+        `(${formatBrowserLeaseDiagnostics(options)}).`,
     );
   }
   return {
@@ -1013,6 +1024,23 @@ async function releaseLocalBrowserTabLease(options: {
     terminationHandled,
     ...(releaseError ? { releaseError } : {}),
   };
+}
+
+function formatBrowserLeaseDiagnostics(options: {
+  sessionId?: string;
+  chromePid?: number;
+  chromePort?: number;
+  chromeTargetId?: string | null;
+  launchDisposition?: "launched" | "reused";
+}): string {
+  return [
+    `session=${options.sessionId ?? "unknown"}`,
+    `controllerPid=${process.pid}`,
+    `chromePid=${options.chromePid ?? "unknown"}`,
+    `chromePort=${options.chromePort ?? "unknown"}`,
+    `target=${options.chromeTargetId ?? "unknown"}`,
+    `launch=${options.launchDisposition ?? "unknown"}`,
+  ].join("; ");
 }
 
 function buildSkippedModelSelectionEvidence(
@@ -2603,19 +2631,18 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       tabLease = null;
       const terminateSharedChrome =
         !keepBrowserOpen && manualLogin && !connectionClosedUnexpectedly
-          ? async () => {
-              if (reusedChrome) {
-                return terminateRecordedChromeForProfile(userDataDir, logger).catch(() => false);
-              }
-              await chrome.kill();
-              return true;
-            }
+          ? async () => terminateRecordedChromeForProfile(userDataDir, logger).catch(() => false)
           : undefined;
       const releaseResult = await releaseLocalBrowserTabLease({
         lease: handle,
         closeOwnedRunTarget,
         cleanupBlankTabs,
         terminateSharedChrome,
+        sessionId: options.sessionId,
+        chromePid: chrome.pid,
+        chromePort: chrome.port,
+        chromeTargetId: isolatedTargetId,
+        launchDisposition: reusedChrome ? "reused" : "launched",
         logger,
       });
       keepBrowserOpen ||= releaseResult.keepBrowserOpen;

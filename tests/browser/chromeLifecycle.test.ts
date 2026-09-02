@@ -204,6 +204,33 @@ describe("hidden-window launch flags", () => {
     }
   });
 
+  test("detaches Windows Chrome from the controller process without opening a console", async () => {
+    const { resolveChromeChildSpawnOptionsForTest } =
+      await import("../../src/browser/chromeLifecycle.js");
+    const stdio: Array<"ignore" | number> = ["ignore", 1, 2];
+
+    expect(
+      resolveChromeChildSpawnOptionsForTest(
+        { detached: false, windowsHide: false, stdio },
+        "win32",
+      ),
+    ).toMatchObject({
+      detached: true,
+      windowsHide: true,
+      stdio,
+    });
+    expect(
+      resolveChromeChildSpawnOptionsForTest(
+        { detached: false, windowsHide: false, stdio },
+        "linux",
+      ),
+    ).toMatchObject({
+      detached: false,
+      windowsHide: false,
+      stdio,
+    });
+  });
+
   test.skipIf(process.platform !== "darwin")(
     "records persisted profile bounds before a fresh hidden Chrome launch",
     async () => {

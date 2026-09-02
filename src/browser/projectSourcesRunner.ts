@@ -56,6 +56,8 @@ type BrowserChrome = LaunchedChrome & { host?: string };
 async function releaseProjectSourcesBrowserTabLease(options: {
   lease: BrowserTabLease;
   terminateSharedChrome?: () => Promise<boolean>;
+  chromePid?: number;
+  chromePort?: number;
   logger: BrowserLogger;
 }): Promise<{
   keepBrowserOpen: boolean;
@@ -77,6 +79,11 @@ async function releaseProjectSourcesBrowserTabLease(options: {
           return;
         }
         if (!options.terminateSharedChrome) return;
+        options.logger(
+          `[browser] ChatGPT browser slot ${options.lease.id.slice(0, 8)} is final; ` +
+            `terminating shared Chrome (session=project-sources; controllerPid=${process.pid}; ` +
+            `chromePid=${options.chromePid ?? "unknown"}; chromePort=${options.chromePort ?? "unknown"}).`,
+        );
         const terminated = await options.terminateSharedChrome().catch(() => false);
         if (terminated) {
           terminationHandled = true;
@@ -102,7 +109,10 @@ async function releaseProjectSourcesBrowserTabLease(options: {
     );
   } else if (otherLeasesRemain) {
     options.logger(
-      "[browser] Other ChatGPT tab leases still active; leaving shared Chrome running.",
+      `[browser] Other ChatGPT tab leases still active; leaving shared Chrome running; ` +
+        `browser slot ${options.lease.id.slice(0, 8)} is non-final ` +
+        `(session=project-sources; controllerPid=${process.pid}; ` +
+        `chromePid=${options.chromePid ?? "unknown"}; chromePort=${options.chromePort ?? "unknown"}).`,
     );
   }
   return {
@@ -340,16 +350,13 @@ export async function runBrowserProjectSources(
       const chromeHandle = chrome;
       const terminateSharedChrome =
         !keepBrowserOpen && manualLogin && chromeHandle && !connectionClosedUnexpectedly
-          ? async () =>
-              reusedChrome
-                ? terminateRecordedChromeForProfile(userDataDir, logger).catch(() => false)
-                : Promise.resolve(chromeHandle.kill())
-                    .then(() => true)
-                    .catch(() => false)
+          ? async () => terminateRecordedChromeForProfile(userDataDir, logger).catch(() => false)
           : undefined;
       const releaseResult = await releaseProjectSourcesBrowserTabLease({
         lease: handle,
         terminateSharedChrome,
+        chromePid: chromeHandle?.pid,
+        chromePort: chromeHandle?.port,
         logger,
       });
       keepBrowserOpen ||= releaseResult.keepBrowserOpen;

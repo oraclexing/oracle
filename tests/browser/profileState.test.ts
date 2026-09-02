@@ -185,36 +185,42 @@ describe("profileState", () => {
     ).toBe(true);
     expect(
       profileState.isChromeCommandForUserDataDirForTest(
-        '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir=C:\\USERS\\XING_\\.ORACLE\\BROWSER-PROFILE',
-        "c:\\users\\xing_\\.oracle\\browser-profile",
-      ),
-    ).toBe(true);
-    expect(
-      profileState.isChromeCommandForUserDataDirForTest(
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/other",
         dir,
       ),
     ).toBe(false);
-    expect(
-      profileState.isChromeCommandForUserDataDirForTest(
-        '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir="C:\\Oracle\\manual-profile-backup"',
-        "C:\\Oracle\\manual-profile",
-      ),
-    ).toBe(false);
-    expect(
-      profileState.isChromeCommandForUserDataDirForTest(
-        '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir "C:\\Oracle\\manual profile"',
-        "c:\\oracle\\manual profile\\",
-      ),
-    ).toBe(true);
-    expect(
-      profileState.isChromeCommandForUserDataDirForTest(
-        'node.exe worker.js --label=chrome --user-data-dir="C:\\Oracle\\manual-profile"',
-        "C:\\Oracle\\manual-profile",
-      ),
-    ).toBe(false);
     expect(profileState.isChromeCommandForUserDataDirForTest("node worker.js", dir)).toBe(false);
   });
+
+  test.runIf(process.platform === "win32")(
+    "matches recorded Windows Chrome commands case-insensitively",
+    () => {
+      expect(
+        profileState.isChromeCommandForUserDataDirForTest(
+          '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir=C:\\USERS\\XING_\\.ORACLE\\BROWSER-PROFILE',
+          "c:\\users\\xing_\\.oracle\\browser-profile",
+        ),
+      ).toBe(true);
+      expect(
+        profileState.isChromeCommandForUserDataDirForTest(
+          '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir="C:\\Oracle\\manual-profile-backup"',
+          "C:\\Oracle\\manual-profile",
+        ),
+      ).toBe(false);
+      expect(
+        profileState.isChromeCommandForUserDataDirForTest(
+          '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir "C:\\Oracle\\manual profile"',
+          "c:\\oracle\\manual profile\\",
+        ),
+      ).toBe(true);
+      expect(
+        profileState.isChromeCommandForUserDataDirForTest(
+          'node.exe worker.js --label=chrome --user-data-dir="C:\\Oracle\\manual-profile"',
+          "C:\\Oracle\\manual-profile",
+        ),
+      ).toBe(false);
+    },
+  );
 
   test("reads the current process start identity", async () => {
     const startedAt = await profileState.readProcessStartTimeMs(process.pid);

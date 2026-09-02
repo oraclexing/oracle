@@ -1,13 +1,14 @@
 import { describe, expect, test, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import {
   acquireBrowserTabLease,
   canonicalProfileIdentityForTest,
   hasOtherActiveBrowserTabLeases,
   normalizeMaxConcurrentTabs,
   removeRegistryLockIfOwnedForTest,
+  type BrowserTabLeaseReleaseContext,
 } from "../../src/browser/tabLeaseRegistry.js";
 
 describe("tabLeaseRegistry", () => {
@@ -383,6 +384,7 @@ describe("tabLeaseRegistry", () => {
   test("detects other active leases before releasing a shared Chrome owner", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "oracle-tab-leases-"));
     try {
+      const logger = vi.fn();
       const first = await acquireBrowserTabLease(dir, {
         maxConcurrentTabs: 3,
         timeoutMs: 500,
@@ -392,11 +394,26 @@ describe("tabLeaseRegistry", () => {
         maxConcurrentTabs: 3,
         timeoutMs: 500,
         sessionId: "second-session",
+        logger,
       });
 
       expect(await hasOtherActiveBrowserTabLeases(dir, first.id)).toBe(true);
 
-      await second.release();
+      let releaseContext: BrowserTabLeaseReleaseContext | undefined;
+      await second.release({
+        onRelease: async (context) => {
+          releaseContext = context;
+        },
+      });
+      expect(releaseContext).toMatchObject({
+        isLastLease: false,
+        releasedLease: { id: second.id, sessionId: "second-session" },
+        remainingLeases: [{ id: first.id, sessionId: "first-session" }],
+      });
+      expect(logger).toHaveBeenCalledWith(
+        expect.stringMatching(/release decision: isLastLease=false; remaining=1/),
+      );
+      expect(logger).toHaveBeenCalledWith(expect.stringContaining("first-session"));
       expect(await hasOtherActiveBrowserTabLeases(dir, first.id)).toBe(false);
 
       await first.release();
@@ -634,14 +651,75 @@ describe("tabLeaseRegistry", () => {
       const before = JSON.parse(await readFile(registryPath, "utf8")) as {
         leases: Array<{ updatedAt: string }>;
       };
-      await new Promise((resolve) => setTimeout(resolve, 75));
-      const after = JSON.parse(await readFile(registryPath, "utf8")) as {
-        leases: Array<{ updatedAt: string }>;
-      };
+      let after = before;
+      const heartbeatDeadline = Date.now() + 2000;
+      while (
+        Date.parse(after.leases[0]!.updatedAt) <= Date.parse(before.leases[0]!.updatedAt) &&
+        Date.now() < heartbeatDeadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        after = JSON.parse(await readFile(registryPath, "utf8")) as {
+          leases: Array<{ updatedAt: string }>;
+        };
+      }
       expect(Date.parse(after.leases[0]!.updatedAt)).toBeGreaterThan(
         Date.parse(before.leases[0]!.updatedAt),
       );
       await lease.release();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("drains an in-flight heartbeat before releasing its lease", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "oracle-tab-leases-heartbeat-drain-"));
+    try {
+      const heartbeatLease = await acquireBrowserTabLease(
+        dir,
+        { maxConcurrentTabs: 2, timeoutMs: 500, sessionId: "heartbeat-owner" },
+        { heartbeatMs: 10 },
+      );
+      const blockingLease = await acquireBrowserTabLease(dir, {
+        maxConcurrentTabs: 2,
+        timeoutMs: 500,
+        sessionId: "lock-holder",
+      });
+      let unlockRegistry!: () => void;
+      let markRegistryLocked!: () => void;
+      const registryLocked = new Promise<void>((resolve) => {
+        markRegistryLocked = resolve;
+      });
+      const blockingRelease = blockingLease.release({
+        onRelease: async ({ isLastLease }) => {
+          expect(isLastLease).toBe(false);
+          markRegistryLocked();
+          await new Promise<void>((resolve) => {
+            unlockRegistry = resolve;
+          });
+        },
+      });
+      await registryLocked;
+
+      // The lock holder prevents the heartbeat update from completing, making
+      // the next release exercise the in-flight heartbeat drain path.
+      await new Promise((resolve) => setTimeout(resolve, 35));
+      let heartbeatReleaseSettled = false;
+      const heartbeatRelease = heartbeatLease.release().then(() => {
+        heartbeatReleaseSettled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(heartbeatReleaseSettled).toBe(false);
+
+      unlockRegistry();
+      await Promise.all([blockingRelease, heartbeatRelease]);
+      expect(heartbeatReleaseSettled).toBe(true);
+      const registry = JSON.parse(
+        await readFile(path.join(dir, "oracle-tab-leases.json"), "utf8"),
+      ) as { leases: unknown[] };
+      expect(registry.leases).toEqual([]);
+      expect(
+        (await readdir(dir)).filter((name) => name.startsWith("oracle-tab-leases.lock")),
+      ).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
