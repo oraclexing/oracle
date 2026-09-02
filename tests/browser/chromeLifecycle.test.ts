@@ -111,6 +111,38 @@ describe("registerTerminationHooks", () => {
     expect(chrome.kill).toHaveBeenCalledTimes(1);
     expect(cleanupMock).toHaveBeenCalledWith(userDataDir, logger, { lockRemovalMode: "never" });
   });
+
+  test("never kills shared manual-login Chrome from a signal hook", async () => {
+    const { registerTerminationHooks } = await import("../../src/browser/chromeLifecycle.js");
+    const chrome = {
+      kill: vi.fn().mockResolvedValue(undefined),
+      pid: 1234,
+      port: 9222,
+    };
+    const logger = vi.fn();
+    const previousExitCode = process.exitCode;
+    const removeHooks = registerTerminationHooks(
+      chrome as unknown as import("chrome-launcher").LaunchedChrome,
+      "/tmp/oracle-shared-manual-login-profile",
+      false,
+      logger,
+      {
+        isInFlight: () => false,
+        preserveUserDataDir: true,
+        preserveSharedChromeOnSignal: true,
+      },
+    );
+
+    try {
+      process.emit("SIGTERM");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(chrome.kill).not.toHaveBeenCalled();
+      expect(logger).toHaveBeenCalledWith(expect.stringContaining("leaving Chrome running"));
+    } finally {
+      removeHooks();
+      process.exitCode = previousExitCode;
+    }
+  });
 });
 
 describe("copied-profile launch flags", () => {

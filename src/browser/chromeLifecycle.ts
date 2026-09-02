@@ -302,6 +302,8 @@ export function registerTerminationHooks(
     emitRuntimeHint?: () => Promise<void>;
     /** Preserve the profile directory even when Chrome is terminated. */
     preserveUserDataDir?: boolean;
+    /** Shared manual-login profiles must never terminate Chrome directly from a signal hook. */
+    preserveSharedChromeOnSignal?: boolean;
     /**
      * Always terminate Chrome and delete `userDataDir` on signal, even when the run is
      * in-flight — for throwaway copied profiles (`--copy-profile`) that must not be left
@@ -320,7 +322,8 @@ export function registerTerminationHooks(
     handling = true;
     const inFlight = opts?.isInFlight?.() ?? false;
     const forceCleanup = opts?.forceProfileCleanup ?? false;
-    const leaveRunning = (keepBrowser || inFlight) && !forceCleanup;
+    const preserveSharedChrome = opts?.preserveSharedChromeOnSignal ?? false;
+    const leaveRunning = (keepBrowser || inFlight || preserveSharedChrome) && !forceCleanup;
     if (leaveRunning) {
       logger(
         `Received ${signal}; leaving Chrome running${inFlight ? " (assistant response pending)" : ""}`,

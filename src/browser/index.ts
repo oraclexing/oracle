@@ -86,11 +86,7 @@ import {
   isRecoverableChromeDisconnect,
   probeChromeTargetLiveness,
 } from "./cdpLiveness.js";
-import {
-  acquireBrowserTabLease,
-  hasOtherActiveBrowserTabLeases,
-  type BrowserTabLease,
-} from "./tabLeaseRegistry.js";
+import { acquireBrowserTabLease, type BrowserTabLease } from "./tabLeaseRegistry.js";
 import {
   appendArtifacts,
   saveBrowserTranscriptArtifact,
@@ -942,6 +938,83 @@ function shouldCleanupBlankTabsAfterLastLease(options: {
   );
 }
 
+async function releaseLocalBrowserTabLease(options: {
+  lease: BrowserTabLease;
+  closeOwnedRunTarget: () => Promise<void>;
+  cleanupBlankTabs: () => Promise<void>;
+  terminateSharedChrome?: () => Promise<boolean>;
+  logger: BrowserLogger;
+}): Promise<{
+  keepBrowserOpen: boolean;
+  terminationHandled: boolean;
+  releaseError?: Error;
+}> {
+  let decisionObserved = false;
+  let keepBrowserOpen = false;
+  let terminationHandled = false;
+  let otherLeasesRemain = false;
+  let releaseError: Error | undefined;
+
+  try {
+    await options.lease.release({
+      onRelease: async ({ isLastLease }) => {
+        decisionObserved = true;
+        if (!isLastLease) {
+          // Record this before any best-effort tab cleanup so a cleanup failure can
+          // never fall through into terminating Chrome used by another lease.
+          keepBrowserOpen = true;
+          otherLeasesRemain = true;
+        }
+        await options.closeOwnedRunTarget().catch(() => undefined);
+        if (!isLastLease) {
+          return;
+        }
+        await options.cleanupBlankTabs().catch(() => undefined);
+        if (options.terminateSharedChrome) {
+          const terminated = await options.terminateSharedChrome().catch(() => false);
+          if (terminated) {
+            terminationHandled = true;
+          } else {
+            // A reused Chrome handle may have a no-op kill implementation. Never
+            // claim cleanup or fall through into an unverified lock-free kill.
+            keepBrowserOpen = true;
+            options.logger(
+              "[browser] Could not verify shared Chrome termination; leaving it available for reuse.",
+            );
+          }
+        }
+      },
+    });
+  } catch (error) {
+    releaseError = error instanceof Error ? error : new Error(String(error));
+    if (!terminationHandled) keepBrowserOpen = true;
+    options.logger(
+      `[browser] Failed to release the ChatGPT browser slot registry lock; restart Oracle/Codex MCP before another browser run: ${releaseError.message}`,
+    );
+  }
+
+  if (!decisionObserved) {
+    options.logger(
+      "[browser] Could not verify final ChatGPT tab lease; leaving shared Chrome running.",
+    );
+    return {
+      keepBrowserOpen: true,
+      terminationHandled: false,
+      ...(releaseError ? { releaseError } : {}),
+    };
+  }
+  if (otherLeasesRemain) {
+    options.logger(
+      "[browser] Other ChatGPT tab leases still active; leaving shared Chrome running.",
+    );
+  }
+  return {
+    keepBrowserOpen,
+    terminationHandled,
+    ...(releaseError ? { releaseError } : {}),
+  };
+}
+
 function buildSkippedModelSelectionEvidence(
   desiredModel: string | null | undefined,
   strategy: BrowserModelSelectionEvidence["strategy"],
@@ -1178,6 +1251,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
         isInFlight: () => runStatus !== "complete",
         emitRuntimeHint,
         preserveUserDataDir: manualLogin,
+        preserveSharedChromeOnSignal: manualLogin,
         // copy-profile is a throwaway copy of a signed-in profile; never leave it on disk.
         forceProfileCleanup: usingCopiedProfile,
       },
@@ -2468,20 +2542,8 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       usingCopiedProfile,
     });
     let cleanupProfileLock: ProfileRunLock | null = null;
-    let terminatedRecordedChrome = false;
-    let otherActiveBrowserTabLeases: boolean | null = null;
-    const hasOtherActiveLeases = async () => {
-      if (!manualLogin || !tabLease) {
-        return false;
-      }
-      if (otherActiveBrowserTabLeases === null) {
-        otherActiveBrowserTabLeases = await hasOtherActiveBrowserTabLeases(
-          userDataDir,
-          tabLease.id,
-        );
-      }
-      return otherActiveBrowserTabLeases;
-    };
+    let browserTerminationHandledByLease = false;
+    let tabLeaseReleaseError: Error | undefined;
     if (!keepBrowserOpen && manualLogin && tabLease) {
       const cleanupLockTimeoutMs = Math.max(0, config.profileLockTimeoutMs ?? 0);
       if (cleanupLockTimeoutMs > 0) {
@@ -2490,15 +2552,6 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           logger,
           sessionId: options.sessionId,
         }).catch(() => null);
-      }
-      keepBrowserOpen = await hasOtherActiveLeases().catch(() => false);
-      if (keepBrowserOpen) {
-        logger("[browser] Other ChatGPT tab leases still active; leaving shared Chrome running.");
-      } else if (reusedChrome && !connectionClosedUnexpectedly) {
-        terminatedRecordedChrome = await terminateRecordedChromeForProfile(
-          userDataDir,
-          logger,
-        ).catch(() => false);
       }
     }
     const closeOwnedRunTarget = async () => {
@@ -2548,13 +2601,26 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     if (tabLease) {
       const handle = tabLease;
       tabLease = null;
-      const onRelease = async ({ isLastLease }: { isLastLease: boolean }) => {
-        await closeOwnedRunTarget();
-        if (isLastLease) {
-          await cleanupBlankTabs();
-        }
-      };
-      await handle.release({ onRelease }).catch(() => undefined);
+      const terminateSharedChrome =
+        !keepBrowserOpen && manualLogin && !connectionClosedUnexpectedly
+          ? async () => {
+              if (reusedChrome) {
+                return terminateRecordedChromeForProfile(userDataDir, logger).catch(() => false);
+              }
+              await chrome.kill();
+              return true;
+            }
+          : undefined;
+      const releaseResult = await releaseLocalBrowserTabLease({
+        lease: handle,
+        closeOwnedRunTarget,
+        cleanupBlankTabs,
+        terminateSharedChrome,
+        logger,
+      });
+      keepBrowserOpen ||= releaseResult.keepBrowserOpen;
+      browserTerminationHandledByLease = releaseResult.terminationHandled;
+      tabLeaseReleaseError = releaseResult.releaseError;
     } else {
       await closeOwnedRunTarget();
       await cleanupBlankTabs();
@@ -2564,7 +2630,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
     if (!keepBrowserOpen) {
       if (!connectionClosedUnexpectedly) {
         try {
-          if (!terminatedRecordedChrome) {
+          if (!browserTerminationHandledByLease) {
             await chrome.kill();
           }
         } catch {
@@ -2603,6 +2669,13 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       const handle = cleanupProfileLock;
       cleanupProfileLock = null;
       await handle.release().catch(() => undefined);
+    }
+    if (tabLeaseReleaseError) {
+      // oxlint-disable-next-line eslint/no-unsafe-finally -- This cleanup failure must override a successful browser result or a live MCP owner can remain locked.
+      throw new Error(
+        "Failed to release the ChatGPT browser slot registry lock; restart Oracle/Codex MCP before another browser run.",
+        { cause: tabLeaseReleaseError },
+      );
     }
   }
 }
@@ -3949,6 +4022,7 @@ export const __test__ = {
   shouldCleanupBlankTabsAfterLastLease,
   shouldCloseOwnedRunTargetAfterRun,
   shouldKeepLocalBrowserOpen,
+  releaseLocalBrowserTabLease,
   waitForAssistantResponseWithReload,
 };
 export { syncCookies } from "./cookies.js";
