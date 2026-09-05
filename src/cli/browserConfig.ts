@@ -106,6 +106,11 @@ export interface BrowserFlagOptions {
 
 export function normalizeChatGptModelForBrowser(model: ModelName): ModelName {
   const normalized = model.toLowerCase() as ModelName;
+  if (normalized === "gpt-6-astra") {
+    throw new Error(
+      "gpt-6-astra is supported only with --engine api in this build; ChatGPT browser selection is not implemented.",
+    );
+  }
   if (!normalized.startsWith("gpt-") || normalized.includes("codex")) {
     return model;
   }
