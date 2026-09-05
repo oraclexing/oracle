@@ -111,7 +111,10 @@ Oracle supports Astra's `low`, `medium`, `high`, `xhigh`, and `max` efforts and
 rejects `none` before inference. The default effort is `xhigh`; Pro is enabled
 only with `--reasoning-mode pro` and retains the long-running behavior above.
 This API support does not add ChatGPT browser aliases or change the default model.
-Selecting `gpt-6-astra` with the browser engine fails explicitly in this build.
+Selecting `gpt-6-astra` with browser strategy `select` fails explicitly in this build.
+The existing `current` and `ignore` strategies remain available: they retain the
+active ChatGPT model without verifying that it is Astra. CLI and MCP both honor
+these strategies, including saved MCP browser configuration.
 
 The default input budget is a conservative 272,000 tokens at the base-rate
 boundary, not the model's maximum capacity. Standard text estimates use $10 per

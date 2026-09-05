@@ -3,15 +3,26 @@ import { resolveApiModel } from "../../src/cli/options.js";
 import { DEFAULT_MODEL } from "../../src/oracle/config.js";
 import { resolveModelConfig } from "../../src/oracle/modelResolver.js";
 import { buildRequestBody } from "../../src/oracle/request.js";
-import { buildBrowserConfig, mapModelToBrowserLabel } from "../../src/cli/browserConfig.js";
+import {
+  buildBrowserConfig,
+  normalizeChatGptModelForBrowser,
+} from "../../src/cli/browserConfig.js";
 
 describe("Astra API model resolution", () => {
   test("rejects unsupported browser selection instead of falling back to Pro", async () => {
-    expect(() => mapModelToBrowserLabel("gpt-6-astra")).toThrow("only with --engine api");
     await expect(buildBrowserConfig({ model: "gpt-6-astra" })).rejects.toThrow(
       "only with --engine api",
     );
   });
+  test.each(["current", "ignore"] as const)(
+    "preserves browser strategy %s",
+    async (browserModelStrategy) => {
+      expect(normalizeChatGptModelForBrowser("gpt-6-astra")).toBe("gpt-6-astra");
+      const config = await buildBrowserConfig({ model: "gpt-6-astra", browserModelStrategy });
+      expect(config.modelStrategy).toBe(browserModelStrategy);
+      expect(config.thinkingTime).toBeUndefined();
+    },
+  );
   test("resolves the exact API ID locally without consulting a provider catalog", async () => {
     const fetcher = vi.fn(() => {
       throw new Error("Unexpected catalog request");
