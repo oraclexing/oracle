@@ -1,5 +1,9 @@
 import type { ChromeClient, BrowserLogger } from "../types.js";
 import type { ThinkingTimeLevel } from "../../oracle/types.js";
+import type {
+  BrowserThinkingSelectionEvidence,
+  BrowserThinkingSelectionStatus,
+} from "../../sessionManager.js";
 import {
   MENU_CONTAINER_SELECTOR,
   MENU_ITEM_SELECTOR,
@@ -101,15 +105,15 @@ function logPickerDiagnostic(result: ThinkingTimeOutcome | undefined, logger: Br
 /**
  * Selects a thinking-time level in ChatGPT's composer.
  *
- * Missing controls remain best-effort except Pro Extended, which fails closed
- * unless the selected option is confirmed.
+ * Returns the UI selection observed at capturedAt, not backend attestation.
+ * Explicit Pro and Pro Extended requests still fail closed when unconfirmed.
  */
 export async function ensureThinkingTime(
   Runtime: ChromeClient["Runtime"],
   level: ThinkingTimeLevel,
   logger: BrowserLogger,
   desiredModel?: string | null,
-) {
+): Promise<BrowserThinkingSelectionEvidence> {
   const result = await evaluateThinkingTimeSelection(Runtime, level, desiredModel);
   const capitalizedLevel = level.charAt(0).toUpperCase() + level.slice(1);
   const targetModelKind = inferThinkingTargetModelKind(desiredModel);
@@ -120,14 +124,28 @@ export async function ensureThinkingTime(
   const strictProEffort =
     level === "pro" ||
     ((targetModelKind === "pro" || observedModelKind === "pro") && level === "extended");
+  const evidence = (
+    status: BrowserThinkingSelectionStatus,
+    resolvedLabel: string | null,
+  ): BrowserThinkingSelectionEvidence => ({
+    requestedLevel: level,
+    status,
+    resolvedLabel,
+    verified: status === "already-selected" || status === "switched",
+    strictFailClosed: strictProEffort,
+    targetModelKind: targetModelKind ?? null,
+    observedModelKind: observedModelKind ?? null,
+    source: "chatgpt-thinking-picker",
+    capturedAt: new Date().toISOString(),
+  });
 
   switch (result?.status) {
     case "already-selected":
       logger(formatBrowserThinkingLog(`${result.label ?? capitalizedLevel} (already selected)`));
-      return;
+      return evidence("already-selected", result.label ?? null);
     case "switched":
       logger(formatBrowserThinkingLog(result.label ?? capitalizedLevel));
-      return;
+      return evidence("switched", result.label ?? null);
     case "option-disabled": {
       await logDomFailure(Runtime, logger, "thinking-option-disabled");
       logPickerDiagnostic(result, logger);
@@ -148,7 +166,7 @@ export async function ensureThinkingTime(
           `${result.label ?? capitalizedLevel} is unavailable on this account (${result.notice ?? "no reason given"}); keeping the effort already selected in ChatGPT.`,
         ),
       );
-      return;
+      return evidence("unverified", null);
     }
     case "chip-not-found":
     case "menu-not-found":
@@ -176,7 +194,7 @@ export async function ensureThinkingTime(
           ? "the effort in ChatGPT is unconfirmed"
           : "keeping the effort already selected in ChatGPT";
       logger(formatBrowserThinkingLog(`${message}; ${outcome}.`));
-      return;
+      return evidence("unverified", null);
     }
     default: {
       await logDomFailure(Runtime, logger, "thinking-time-unknown");
@@ -192,7 +210,7 @@ export async function ensureThinkingTime(
           `unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`,
         ),
       );
-      return;
+      return evidence("unverified", null);
     }
   }
 }
@@ -1064,20 +1082,48 @@ function buildThinkingTimeExpression(
         const thumb = slider?.querySelector?.('[role="slider"]');
         if (!control || !thumb || !isVisible(control)) return null;
         const levels = ['light', 'standard', 'extended', 'extra-high', 'pro'];
-        const labels = describedIds(control)
-          .map((id) => (document.getElementById?.(id)?.textContent ?? '').split(/[,，]/)[0].trim())
-          .filter((label) => levels.some((level) => TARGET_LEVEL_TOKENS[level].some((token) => normalize(token) === normalize(label))));
-        if (labels.length !== 1) return null;
-        const label = labels[0];
-        const index = levels.findIndex((level) => TARGET_LEVEL_TOKENS[level].some((token) => normalize(token) === normalize(label)));
+        // The selected label leads localized aria-describedby prose, while punctuation
+        // and ordinal grammar vary by locale. Match only that leading label and let
+        // the thumb's numeric ARIA state independently prove its position.
+        const readLeadingLevel = (description) => {
+          const value = (description ?? '').normalize('NFC').trim();
+          if (!value) return null;
+          const matches = levels.flatMap((level, index) => {
+            const token = [...TARGET_LEVEL_TOKENS[level]]
+              .sort((left, right) => right.length - left.length)
+              .find((candidate) => {
+                const normalizedCandidate = candidate.normalize('NFC');
+                const prefix = value.slice(0, normalizedCandidate.length);
+                if (normalize(prefix) !== normalize(normalizedCandidate)) return false;
+                // normalize() erases Unicode letters and marks; inspect the boundary intact.
+                const suffix = value.slice(prefix.length);
+                return !suffix || /^[\\s\\p{P}]/u.test(suffix);
+              });
+            return token
+              ? [{ level, index, label: value.slice(0, token.normalize('NFC').length) }]
+              : [];
+          });
+          return matches.length === 1 ? matches[0] : null;
+        };
+        const selections = describedIds(control)
+          .map((id) => readLeadingLevel(document.getElementById?.(id)?.textContent ?? ''))
+          .filter(Boolean);
+        if (selections.length !== 1) return null;
+        const { label, index, level } = selections[0];
         // This adapter owns the observed five-tier layout only. A different range
         // or contradictory announcement must not turn a numeric guess into proof.
         if (thumb.getAttribute('aria-valuemin') !== '0' || thumb.getAttribute('aria-valuemax') !== '4' ||
             thumb.getAttribute('aria-valuenow') !== String(index)) return null;
-        return { control, label, index, level: levels[index] };
+        return { control, label, index, level };
       };
       let current = resolve();
       const finish = (result) => { closeOpenMenus(); return result; };
+      // The picker can expose its simple view before the keyboard owner is mounted or visible.
+      const readyDeadline = performance.now() + MAX_WAIT_MS;
+      while (!current && performance.now() < readyDeadline) {
+        await sleep(100);
+        current = resolve();
+      }
       if (!current) return finish(failure('selection-unverified'));
       // Preserve the legacy Pro-model + extended contract on unified pickers.
       const target = TARGET_MODEL_KIND === 'pro' && TARGET_LEVEL === 'extended' ? 'pro' : TARGET_LEVEL;

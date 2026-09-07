@@ -42,6 +42,8 @@ export interface BrowserSessionConfig {
   timeoutMs?: number;
   debugPort?: number | null;
   inputTimeoutMs?: number;
+  /** Time budget for each Chrome remote-debugging approval prompt. */
+  approvalWaitMs?: number;
   /** Time budget for attachment upload/readiness before clicking send. */
   attachmentTimeoutMs?: number;
   /** Delay before rechecking the conversation after an assistant timeout. */
@@ -109,6 +111,15 @@ export interface BrowserRuntimeMetadata {
 
 export type BrowserHarvestState = "running" | "completed" | "stalled" | "detached";
 
+export interface BrowserHarvestIntegrity {
+  status: "matched" | "mismatch" | "unverified";
+  observedConversationId?: string;
+  captured: Array<{ source: string; conversationId: string }>;
+  unverifiedSources: string[];
+  explicitTarget: boolean;
+  previousHarvestConversationId?: string;
+}
+
 export interface BrowserHarvestMetadata {
   targetId?: string;
   url?: string;
@@ -121,6 +132,7 @@ export interface BrowserHarvestMetadata {
   assistantCount?: number;
   currentModelLabel?: string;
   lastAssistantSnippet?: string;
+  integrity?: BrowserHarvestIntegrity;
 }
 
 export type BrowserModelSelectionEvidenceStatus =
@@ -140,6 +152,25 @@ export interface BrowserModelSelectionEvidence {
   capturedAt: string;
 }
 
+export type BrowserThinkingSelectionStatus = "already-selected" | "switched" | "unverified";
+
+/**
+ * Selection-time UI evidence, separate from the model picker record.
+ * `verified` confirms the observed selected state at `capturedAt`; it does not
+ * attest backend effort or later UI changes. Strict requests throw if unconfirmed.
+ */
+export interface BrowserThinkingSelectionEvidence {
+  requestedLevel: ThinkingTimeLevel;
+  status: BrowserThinkingSelectionStatus;
+  resolvedLabel?: string | null;
+  verified: boolean;
+  strictFailClosed: boolean;
+  targetModelKind?: string | null;
+  observedModelKind?: string | null;
+  source: "chatgpt-thinking-picker";
+  capturedAt: string;
+}
+
 export interface BrowserRunWarning {
   code: string;
   severity: "warning";
@@ -153,6 +184,7 @@ export interface BrowserMetadata {
   harvest?: BrowserHarvestMetadata;
   archive?: BrowserArchiveResult;
   modelSelection?: BrowserModelSelectionEvidence;
+  thinkingSelection?: BrowserThinkingSelectionEvidence;
   warnings?: BrowserRunWarning[];
 }
 
@@ -249,6 +281,7 @@ export interface StoredRunOptions {
   modelOverrides?: ModelOverridesConfig;
   renderPlain?: boolean;
   writeOutputPath?: string;
+  writeArtifacts?: boolean;
   partialMode?: PartialMode;
   timeoutSeconds?: number | "auto";
   httpTimeoutMs?: number;
@@ -264,6 +297,7 @@ export interface StoredRunOptions {
   browserResumeConversationUrl?: string;
   aspectRatio?: string;
   geminiShowThoughts?: boolean;
+  geminiAllowModelFallback?: boolean;
 }
 
 export interface SessionMetadata {
@@ -496,9 +530,41 @@ async function writeSessionMetadataFile(
       encoding: "utf8",
       mode: 0o600,
     });
-    await fs.rename(temporaryPath, targetPath);
+    await renameSessionMetadataFile(temporaryPath, targetPath);
   } finally {
     await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+const METADATA_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200, 400, 800] as const;
+const RETRIABLE_METADATA_RENAME_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+
+function isRetriableMetadataRenameError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    RETRIABLE_METADATA_RENAME_CODES.has(error.code)
+  );
+}
+
+async function renameSessionMetadataFile(temporaryPath: string, targetPath: string): Promise<void> {
+  for (const delayMs of [0, ...METADATA_RENAME_RETRY_DELAYS_MS]) {
+    if (delayMs > 0) {
+      await wait(delayMs);
+    }
+    try {
+      await fs.rename(temporaryPath, targetPath);
+      return;
+    } catch (error) {
+      if (
+        !isRetriableMetadataRenameError(error) ||
+        delayMs === METADATA_RENAME_RETRY_DELAYS_MS.at(-1)
+      ) {
+        throw error;
+      }
+    }
   }
 }
 
@@ -698,6 +764,7 @@ export async function initializeSession(
       zombieTimeoutMs: options.zombieTimeoutMs,
       zombieUseLastActivity: options.zombieUseLastActivity,
       writeOutputPath: options.writeOutputPath,
+      writeArtifacts: options.writeArtifacts,
       partialMode: options.partialMode,
       waitPreference: options.waitPreference,
       youtube: options.youtube,
@@ -708,6 +775,7 @@ export async function initializeSession(
       browserResumeConversationUrl: options.browserResumeConversationUrl,
       aspectRatio: options.aspectRatio,
       geminiShowThoughts: options.geminiShowThoughts,
+      geminiAllowModelFallback: options.geminiAllowModelFallback,
     },
   };
   await ensureDir(modelsDir(sessionId));

@@ -7,6 +7,7 @@ import { normalizeThinkingTimeLevel } from "../oracle/thinkingTime.js";
 import { CHATGPT_URL, DEFAULT_MODEL_STRATEGY, DEFAULT_MODEL_TARGET } from "../browser/constants.js";
 import { normalizeChatgptUrl } from "../browser/utils.js";
 import { parseDuration } from "../duration.js";
+import { resolveBrowserApprovalWait } from "../browser/config.js";
 import { normalizeBrowserModelStrategy } from "../browser/modelStrategy.js";
 import type {
   BrowserArchiveMode,
@@ -65,6 +66,7 @@ export interface BrowserFlagOptions {
   browserUrl?: string;
   browserTimeout?: string;
   browserInputTimeout?: string;
+  browserApprovalWait?: string;
   browserAttachmentTimeout?: string;
   browserRecheckDelay?: string;
   browserRecheckTimeout?: string;
@@ -257,6 +259,7 @@ export async function buildBrowserConfig(
           DEFAULT_BROWSER_INPUT_TIMEOUT_MS,
         )
       : undefined,
+    approvalWaitMs: resolveBrowserApprovalWait(options.browserApprovalWait),
     attachmentTimeoutMs: options.browserAttachmentTimeout
       ? parseBrowserDuration(
           options.browserAttachmentTimeout,
@@ -435,7 +438,7 @@ export function resolveBrowserModelLabel(input: string | undefined, model: Model
   return trimmed;
 }
 
-function parseRemoteChromeTarget(raw: string): { host: string; port: number } {
+export function parseRemoteChromeTarget(raw: string): { host: string; port: number } {
   const target = raw.trim();
   if (!target) {
     throw new Error(
