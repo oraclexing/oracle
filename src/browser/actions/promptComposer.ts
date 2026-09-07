@@ -1,4 +1,5 @@
 import type { ChromeClient, BrowserLogger } from "../types.js";
+import { randomUUID } from "node:crypto";
 import {
   INPUT_SELECTORS,
   PROMPT_PRIMARY_SELECTOR,
@@ -13,10 +14,17 @@ import {
 } from "../conversationTurns.js";
 import { delay } from "../utils.js";
 import { logDomFailure } from "../domDebug.js";
-import { assertComposerPlusStayedInPlace, buildAttachmentNamePattern } from "./attachments.js";
+import {
+  assertComposerNavigationSnapshot,
+  assertComposerPlusStayedInPlace,
+  buildAttachmentNamePattern,
+  composerNavigationIdentityFromUrl,
+} from "./attachments.js";
+import { buildComposerNavigationValidationExpression } from "./attachmentContext.js";
 import { buildClickDispatcher } from "./domEvents.js";
 import { BrowserAutomationError } from "../../oracle/errors.js";
 import { buildAttachmentEvidenceExpression } from "./attachmentEvidence.js";
+import { buildAttachmentProgressExpression } from "./attachmentProgress.js";
 
 const ENTER_KEY_EVENT = {
   key: "Enter",
@@ -64,6 +72,9 @@ export async function submitPrompt(
         code: "attachment-navigation-identity-unavailable",
       },
     );
+  }
+  if (hasAttachments) {
+    await assertComposerPlusStayedInPlace(runtime, deps.attachmentNavigationUrl!);
   }
 
   await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
@@ -554,7 +565,7 @@ function buildAttachmentReadyExpression(attachmentNames: AttachmentReadyInput[])
         ),
       ),
     );
-    return chipsReady || inputsReady;
+    return (chipsReady || inputsReady) && !${buildAttachmentProgressExpression("composer")};
   })()`;
 }
 
@@ -659,7 +670,13 @@ async function attemptSendButton(
     }
     if (needAttachment) {
       if (
-        await activateExactAttachmentSendButton(Runtime, Input, logger, attachmentNavigationUrl)
+        await activateExactAttachmentSendButton(
+          Runtime,
+          Input,
+          logger,
+          attachmentNavigationUrl,
+          attachmentNames,
+        )
       ) {
         return true;
       }
@@ -734,6 +751,7 @@ async function activateExactAttachmentSendButton(
   Input: ChromeClient["Input"],
   logger?: BrowserLogger,
   attachmentNavigationUrl?: string,
+  attachmentNames: AttachmentReadyInput[] = [],
 ): Promise<boolean> {
   const probe = await Runtime.evaluate({
     expression: `(() => {
@@ -766,16 +784,120 @@ async function activateExactAttachmentSendButton(
       },
     );
   }
-  if (attachmentNavigationUrl) {
-    await assertComposerPlusStayedInPlace(Runtime, attachmentNavigationUrl);
+  const expectedIdentity = composerNavigationIdentityFromUrl(attachmentNavigationUrl ?? "");
+  if (!expectedIdentity || !attachmentNavigationUrl) {
+    throw new BrowserAutomationError("Attachment page identity is unavailable before dispatch.", {
+      stage: "submit-prompt",
+      code: "attachment-navigation-identity-unavailable",
+    });
   }
-  await Input.dispatchKeyEvent({
-    type: "keyDown",
-    ...ENTER_KEY_EVENT,
-    text: ENTER_KEY_TEXT,
-    unmodifiedText: ENTER_KEY_TEXT,
+  const guardId = randomUUID();
+  // Recheck at event delivery too: a SPA can navigate after the CDP probe returns.
+  const boundary = await Runtime.evaluate({
+    expression: `(() => {
+        const button = document.querySelector('button[data-testid="send-button"]');
+        const check = () => {
+          const navigation = ${buildComposerNavigationValidationExpression(attachmentNavigationUrl)};
+          const rect = button?.getBoundingClientRect();
+          const style = button ? window.getComputedStyle(button) : null;
+          return {
+            ...navigation,
+            focused: button instanceof HTMLElement && document.activeElement === button &&
+              document.querySelector('button[data-testid="send-button"]') === button &&
+              !button.hasAttribute('disabled') && button.getAttribute('aria-disabled') !== 'true' &&
+              button.getAttribute('data-disabled') !== 'true' && rect.width > 0 && rect.height > 0 &&
+              style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none',
+            attachmentsReady: ${buildAttachmentReadyExpression(attachmentNames)},
+          };
+        };
+        const safeCheck = () => {
+          try { return check(); } catch { return { currentUrl: location.href, contextMatches: false, focused: false, attachmentsReady: false }; }
+        };
+        const snapshot = safeCheck();
+        if (!snapshot.contextMatches || !snapshot.focused || !snapshot.attachmentsReady) return snapshot;
+        const existing = window.__oracleAttachmentDispatchGuard;
+        if (existing && !existing.finished) return { ...snapshot, focused: false };
+        existing?.cleanup?.();
+        const guard = { id: ${JSON.stringify(guardId)}, sawKeyDown: false, blocked: null, finished: false };
+        const detach = () => {
+          window.removeEventListener('keydown', onKeyDown, true);
+          window.removeEventListener('keyup', onKeyUp, true);
+          window.removeEventListener('click', onClick, true);
+          guard.finished = true;
+        };
+        const cancel = (event, state) => {
+          event.preventDefault(); event.stopImmediatePropagation(); guard.blocked = state;
+        };
+        const onKeyDown = event => {
+          if (event.key !== 'Enter' || !event.isTrusted) return;
+          guard.sawKeyDown = true;
+          const state = safeCheck();
+          if (!state.contextMatches || !state.focused || !state.attachmentsReady) cancel(event, state);
+        };
+        const onKeyUp = event => {
+          if (event.key === 'Enter' && event.isTrusted && guard.blocked) { cancel(event, guard.blocked); detach(); }
+        };
+        const onClick = event => {
+          if (!guard.sawKeyDown || !(event.target instanceof Node) ||
+              !(button.contains(event.target) || event.target instanceof Element && event.target.closest('button[data-testid="send-button"]'))) return;
+          const state = safeCheck();
+          if (guard.blocked || !state.contextMatches || !state.focused || !state.attachmentsReady) cancel(event, guard.blocked ?? state);
+          detach();
+        };
+        guard.cleanup = () => { detach(); if (window.__oracleAttachmentDispatchGuard === guard) delete window.__oracleAttachmentDispatchGuard; };
+        window.__oracleAttachmentDispatchGuard = guard;
+        window.addEventListener('keydown', onKeyDown, true);
+        window.addEventListener('keyup', onKeyUp, true);
+        window.addEventListener('click', onClick, true);
+        return snapshot;
+      })()`,
+    returnByValue: true,
   });
-  await Input.dispatchKeyEvent({ type: "keyUp", ...ENTER_KEY_EVENT });
+  const snapshot = boundary?.result?.value as
+    | { focused?: boolean; attachmentsReady?: boolean }
+    | undefined;
+  assertComposerNavigationSnapshot(attachmentNavigationUrl, snapshot);
+  if (snapshot?.focused !== true || snapshot.attachmentsReady !== true) return false;
+  let delivery: { sawKeyDown?: boolean; blocked?: unknown } | undefined;
+  try {
+    await Input.dispatchKeyEvent({
+      type: "keyDown",
+      ...ENTER_KEY_EVENT,
+      text: ENTER_KEY_TEXT,
+      unmodifiedText: ENTER_KEY_TEXT,
+    });
+    await Input.dispatchKeyEvent({ type: "keyUp", ...ENTER_KEY_EVENT });
+  } finally {
+    const result = await Runtime.evaluate({
+      expression: `(() => {
+        const guard = window.__oracleAttachmentDispatchGuard;
+        if (guard?.id !== ${JSON.stringify(guardId)}) return null;
+        const summary = { sawKeyDown: guard.sawKeyDown, blocked: guard.blocked };
+        guard.cleanup(); return summary;
+      })()`,
+      returnByValue: true,
+    }).catch(() => undefined);
+    delivery = result?.result?.value as typeof delivery;
+  }
+  if (delivery?.blocked) {
+    assertComposerNavigationSnapshot(attachmentNavigationUrl, delivery.blocked);
+    throw new BrowserAutomationError(
+      "Attachment focus or upload readiness changed at dispatch; the send was stopped.",
+      {
+        stage: "submit-prompt",
+        code: "attachment-send-not-ready",
+      },
+    );
+  }
+  if (delivery?.sawKeyDown !== true) {
+    throw new BrowserAutomationError(
+      "Attachment input delivery could not be verified; do not retry automatically.",
+      {
+        stage: "submit-prompt",
+        code: "attachment-send-ambiguous",
+      },
+    );
+  }
   logger?.("Activated exact attachment send button via keyboard");
   return true;
 }

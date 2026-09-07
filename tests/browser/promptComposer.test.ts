@@ -355,6 +355,22 @@ describe("promptComposer", () => {
       const events: string[] = [];
       const runtime = {
         evaluate: vi.fn(async ({ expression }: { expression: string }) => {
+          if (expression.includes("const summary =")) {
+            return { result: { value: { sawKeyDown: true, blocked: null } } };
+          }
+          if (expression.includes("const navigation =")) {
+            events.push("navigationGuard");
+            return {
+              result: {
+                value: {
+                  currentUrl: "https://chatgpt.com/",
+                  workSelected: false,
+                  focused: true,
+                  attachmentsReady: true,
+                },
+              },
+            };
+          }
           if (expression.includes("const uploadEvidence")) {
             return { result: { value: true } };
           }
@@ -435,6 +451,18 @@ describe("promptComposer", () => {
     try {
       const runtime = {
         evaluate: vi.fn(async ({ expression }: { expression: string }) => {
+          if (expression.includes("const navigation =")) {
+            return {
+              result: {
+                value: {
+                  currentUrl: "https://chatgpt.com/c/WEB:delayed-work",
+                  workSelected: false,
+                  focused: true,
+                  attachmentsReady: true,
+                },
+              },
+            };
+          }
           if (expression.includes("const uploadEvidence")) {
             return { result: { value: true } };
           }
@@ -496,6 +524,18 @@ describe("promptComposer", () => {
     try {
       const runtime = {
         evaluate: vi.fn(async ({ expression }: { expression: string }) => {
+          if (expression.includes("const navigation =")) {
+            return {
+              result: {
+                value: {
+                  currentUrl: "https://chatgpt.com/g/g-project-b/project",
+                  workSelected: false,
+                  focused: true,
+                  attachmentsReady: true,
+                },
+              },
+            };
+          }
           if (expression.includes("const uploadEvidence")) {
             return { result: { value: true } };
           }

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { ChromeClient, BrowserAttachment, BrowserLogger } from "../types.js";
 import { INPUT_SELECTORS, SEND_BUTTON_SELECTORS, UPLOAD_STATUS_SELECTORS } from "../constants.js";
 import { buildConversationTurnListExpression } from "../conversationTurns.js";
@@ -6,7 +7,23 @@ import { delay } from "../utils.js";
 import { logDomFailure } from "../domDebug.js";
 import { BrowserAutomationError } from "../../oracle/errors.js";
 import { transferAttachmentViaDataTransfer } from "./attachmentDataTransfer.js";
-import { conversationIdFromUrl } from "./navigation.js";
+import { buildAttachmentProgressExpression } from "./attachmentProgress.js";
+import {
+  assertComposerPlusStayedInPlace,
+  assertComposerNavigationSnapshot,
+  buildComposerNavigationValidationExpression,
+  buildComposerNavigationProbeExpression,
+  withGuardedFileInput,
+  dispatchGuardedFileInputEvents,
+  clearGuardedFileInput,
+} from "./attachmentContext.js";
+export {
+  captureComposerNavigationUrl,
+  assertComposerPlusStayedInPlace,
+  buildComposerNavigationProbeExpression,
+  assertComposerNavigationSnapshot,
+  composerNavigationIdentityFromUrl,
+} from "./attachmentContext.js";
 import {
   beginAttachmentEvidence,
   confirmAttachmentEvidence,
@@ -44,66 +61,36 @@ export interface ComposerPlusActivationResult {
 }
 
 type ComposerPlusProbe = {
-  status?: "focused" | "missing" | "work-selected";
+  status?: "focused" | "missing" | "work-selected" | "mode-unverified" | "context-changed";
+  navigation?: unknown;
   startUrl?: string;
   focused?: boolean;
 };
 
-export async function captureComposerNavigationUrl(
-  runtime: ChromeClient["Runtime"],
-): Promise<string> {
-  const result = await runtime.evaluate({
-    expression: "location.href",
-    returnByValue: true,
-  });
-  const url = result?.result?.value;
-  if (typeof url !== "string" || !url) {
-    throw new BrowserAutomationError(
-      "Oracle could not capture ChatGPT's page identity before attachment upload.",
-      {
-        stage: "upload-attachment",
-        code: "attachment-navigation-identity-unavailable",
-      },
-    );
-  }
-  return url;
-}
-
 export async function activateComposerPlus(
   runtime: ChromeClient["Runtime"],
   input?: ChromeClient["Input"],
+  navigationUrl?: string,
 ): Promise<ComposerPlusActivationResult> {
+  const guardId = randomUUID();
   const probe = await Promise.resolve(
     runtime.evaluate({
       expression: `(() => {
-        const startUrl = location.href;
-        const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-        const isWorkLabel = value => ['work', '工作'].includes(normalize(value));
-        const selected = node =>
-          node?.getAttribute?.('aria-checked') === 'true' ||
-          node?.getAttribute?.('aria-selected') === 'true' ||
-          node?.getAttribute?.('aria-pressed') === 'true' ||
-          node?.getAttribute?.('data-state') === 'on' ||
-          node?.getAttribute?.('data-state') === 'active';
-        const workToggleSelected = Array.from(
-          document.querySelectorAll('button[role="radio"],button[role="tab"],button[aria-pressed]'),
-        ).some(node => isWorkLabel(node.textContent) && selected(node));
-        const prompt = document.querySelector('#prompt-textarea');
-        const fallbackPrompt = document.querySelector('textarea[name="prompt-textarea"]');
-        const placeholder = normalize(
-          prompt?.getAttribute?.('data-placeholder') ||
-          prompt?.getAttribute?.('placeholder') ||
-          fallbackPrompt?.getAttribute?.('placeholder'),
-        );
-        if (workToggleSelected || placeholder === 'work on anything') {
+        const navigation = ${navigationUrl ? buildComposerNavigationValidationExpression(navigationUrl) : buildComposerNavigationProbeExpression()};
+        const startUrl = navigation.currentUrl;
+        if (navigation.contextMatches === false) return { status: 'context-changed', startUrl, navigation };
+        if (navigation.workSelected) {
           return { status: 'work-selected', startUrl };
         }
+        if (navigation.modeUnverified) return { status: 'mode-unverified', startUrl };
         const selectors = ['#composer-plus-btn', 'button[data-testid="composer-plus-btn"]'];
         for (const selector of selectors) {
           const node = document.querySelector(selector);
           if (!(node instanceof HTMLElement)) continue;
           const rect = node.getBoundingClientRect();
           if (rect.width <= 0 || rect.height <= 0) continue;
+          const nodes = window.__oracleAttachmentPlusNodes ??= Object.create(null);
+          nodes[${JSON.stringify(guardId)}] = node;
           node.focus({ preventScroll: true });
           return { status: 'focused', startUrl, focused: document.activeElement === node };
         }
@@ -111,11 +98,22 @@ export async function activateComposerPlus(
       })()`,
       returnByValue: true,
     }),
-  )
-    .then((result) => result?.result?.value as ComposerPlusProbe | undefined)
-    .catch(() => undefined);
+  ).then((result) => result?.result?.value as ComposerPlusProbe | undefined);
 
-  const startUrl = typeof probe?.startUrl === "string" ? probe.startUrl : "";
+  const startUrl = navigationUrl ?? (typeof probe?.startUrl === "string" ? probe.startUrl : "");
+  if (probe?.status === "context-changed") {
+    assertComposerNavigationSnapshot(startUrl, probe.navigation);
+  }
+  if (probe?.status === "mode-unverified") {
+    throw new BrowserAutomationError(
+      "ChatGPT mode could not be verified; attachment preparation was stopped.",
+      {
+        stage: "upload-attachment",
+        code: "attachment-control-mode-unverified",
+        startUrl,
+      },
+    );
+  }
   if (probe?.status === "work-selected") {
     throw new BrowserAutomationError(
       "Oracle refused to open the attachment menu because ChatGPT is in Work mode.",
@@ -130,128 +128,102 @@ export async function activateComposerPlus(
     return { method: "unavailable", startUrl };
   }
 
-  if (probe.focused && input && typeof input.dispatchKeyEvent === "function") {
-    try {
+  const trusted = Boolean(input && typeof input.dispatchKeyEvent === "function");
+  let delivery: { sawKeyDown?: boolean; clicked?: boolean; blocked?: unknown } | undefined;
+  try {
+    const prepared = await runtime.evaluate({
+      expression: `(() => {
+        const button = window.__oracleAttachmentPlusNodes?.[${JSON.stringify(guardId)}];
+        const check = () => {
+          const navigation = ${buildComposerNavigationValidationExpression(startUrl)};
+          const rect = button?.getBoundingClientRect();
+          return { ...navigation, focused: button instanceof HTMLElement && button.isConnected &&
+            document.activeElement === button && document.querySelector('#composer-plus-btn, button[data-testid="composer-plus-btn"]') === button &&
+            !button.hasAttribute('disabled') && button.getAttribute('aria-disabled') !== 'true' &&
+            rect.width > 0 && rect.height > 0 };
+        };
+        const safeCheck = () => { try { return check(); } catch { return { currentUrl: location.href, contextMatches: false, focused: false }; } };
+        const guard = { sawKeyDown: false, clicked: false, blocked: null };
+        const cancel = (event, state) => { event.preventDefault(); event.stopImmediatePropagation(); guard.blocked = state; };
+        const onKey = event => {
+          if (event.key !== 'Enter' || !event.isTrusted) return;
+          if (event.type === 'keyup') { if (guard.blocked) cancel(event, guard.blocked); return; }
+          guard.sawKeyDown = true;
+          const state = safeCheck();
+          if (guard.blocked || !state.contextMatches || !state.focused) cancel(event, guard.blocked ?? state);
+        };
+        const onClick = event => {
+          if (!guard.sawKeyDown && ${trusted}) return;
+          const state = safeCheck();
+          if (guard.blocked || !state.contextMatches || !state.focused || !(event.target instanceof Node) || !button.contains(event.target)) cancel(event, guard.blocked ?? state);
+          else guard.clicked = true;
+        };
+        guard.cleanup = () => {
+          window.removeEventListener('keydown', onKey, true);
+          window.removeEventListener('keyup', onKey, true);
+          window.removeEventListener('click', onClick, true);
+        };
+        const guards = window.__oracleAttachmentPlusGuards ??= Object.create(null);
+        guards[${JSON.stringify(guardId)}] = guard;
+        const state = safeCheck();
+        if (!state.contextMatches || !state.focused) { guard.blocked = state; return state; }
+        window.addEventListener('keydown', onKey, true);
+        window.addEventListener('keyup', onKey, true);
+        window.addEventListener('click', onClick, true);
+        if (!${trusted}) button.click();
+        return state;
+      })()`,
+      returnByValue: true,
+    });
+    const state = prepared.result?.value as { focused?: boolean } | undefined;
+    assertComposerNavigationSnapshot(startUrl, state);
+    if (!state?.focused)
+      throw new BrowserAutomationError(
+        "Attachment menu focus changed before activation; upload was stopped.",
+        { stage: "upload-attachment", code: "attachment-plus-not-ready" },
+      );
+    if (trusted && input) {
       const enter = {
         key: "Enter",
         code: "Enter",
         windowsVirtualKeyCode: 13,
         nativeVirtualKeyCode: 13,
       } as const;
-      await input.dispatchKeyEvent({
-        type: "keyDown",
-        ...enter,
-        text: "\r",
-        unmodifiedText: "\r",
-      });
+      // A transport failure can follow a successful dispatch; never activate twice.
+      await input.dispatchKeyEvent({ type: "keyDown", ...enter, text: "\r", unmodifiedText: "\r" });
       await input.dispatchKeyEvent({ type: "keyUp", ...enter });
-      return { method: "trusted-keyboard", startUrl };
-    } catch {
-      // Fall through to an exact-selector synthetic click. Never use page coordinates here.
     }
-  }
-
-  const clicked = await Promise.resolve(
-    runtime.evaluate({
-      expression: `(() => {
-        const selectors = ['#composer-plus-btn', 'button[data-testid="composer-plus-btn"]'];
-        for (const selector of selectors) {
-          const node = document.querySelector(selector);
-          if (!(node instanceof HTMLElement)) continue;
-          const rect = node.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) continue;
-          node.click();
-          return true;
-        }
-        return false;
+  } finally {
+    const observed = await runtime
+      .evaluate({
+        expression: `(() => {
+        const guards = window.__oracleAttachmentPlusGuards;
+        const guard = guards?.[${JSON.stringify(guardId)}];
+        const nodes = window.__oracleAttachmentPlusNodes;
+        if (nodes) delete nodes[${JSON.stringify(guardId)}];
+        if (!guard) return null;
+        const summary = { sawKeyDown: guard.sawKeyDown, clicked: guard.clicked, blocked: guard.blocked };
+        guard.cleanup(); delete guards[${JSON.stringify(guardId)}]; return summary;
       })()`,
-      returnByValue: true,
-    }),
-  )
-    .then((result) => Boolean(result?.result?.value))
-    .catch(() => false);
-  return { method: clicked ? "synthetic" : "unavailable", startUrl };
-}
-
-export async function assertComposerPlusStayedInPlace(
-  runtime: ChromeClient["Runtime"],
-  startUrl: string,
-): Promise<void> {
-  const result = await runtime.evaluate({
-    expression: `(() => {
-      const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-      const isWorkLabel = value => ['work', '工作'].includes(normalize(value));
-      const selected = node =>
-        node?.getAttribute?.('aria-checked') === 'true' ||
-        node?.getAttribute?.('aria-selected') === 'true' ||
-        node?.getAttribute?.('aria-pressed') === 'true' ||
-        node?.getAttribute?.('data-state') === 'on' ||
-        node?.getAttribute?.('data-state') === 'active';
-      const workToggleSelected = Array.from(
-        document.querySelectorAll('button[role="radio"],button[role="tab"],button[aria-pressed]'),
-      ).some(node => isWorkLabel(node.textContent) && selected(node));
-      const prompt = document.querySelector('#prompt-textarea');
-      const fallbackPrompt = document.querySelector('textarea[name="prompt-textarea"]');
-      const placeholder = normalize(
-        prompt?.getAttribute?.('data-placeholder') ||
-        prompt?.getAttribute?.('placeholder') ||
-        fallbackPrompt?.getAttribute?.('placeholder'),
-      );
-      return {
-        currentUrl: location.href,
-        workSelected: workToggleSelected || placeholder === 'work on anything',
-      };
-    })()`,
-    returnByValue: true,
-  });
-  const value = result?.result?.value as
-    | { currentUrl?: string; workSelected?: boolean }
-    | undefined;
-  const currentUrl = typeof value?.currentUrl === "string" ? value.currentUrl : "";
-  const startIdentity = composerNavigationIdentityFromUrl(startUrl);
-  const currentIdentity = composerNavigationIdentityFromUrl(currentUrl);
-  const unexpectedNavigation =
-    !startIdentity ||
-    !currentIdentity ||
-    startIdentity.origin !== currentIdentity.origin ||
-    (startIdentity.conversationId !== null
-      ? currentIdentity.conversationId !== startIdentity.conversationId
-      : currentIdentity.conversationId !== null ||
-        currentIdentity.landingPath !== startIdentity.landingPath);
-  if (value?.workSelected || unexpectedNavigation) {
+        returnByValue: true,
+      })
+      .catch(() => undefined);
+    delivery = observed?.result?.value as typeof delivery;
+  }
+  if (delivery?.blocked) {
+    assertComposerNavigationSnapshot(startUrl, delivery.blocked);
     throw new BrowserAutomationError(
-      "ChatGPT navigated to Work or another ChatGPT context during attachment preparation; upload/send was stopped before prompt submission.",
-      {
-        stage: "upload-attachment",
-        code: "attachment-control-unexpected-navigation",
-        startUrl,
-        currentUrl,
-        workSelected: Boolean(value?.workSelected),
-        startNavigationIdentity: startIdentity,
-        currentNavigationIdentity: currentIdentity,
-      },
+      "Attachment menu focus changed at activation; upload was stopped.",
+      { stage: "upload-attachment", code: "attachment-plus-not-ready" },
     );
   }
-}
-
-interface ComposerNavigationIdentity {
-  origin: string;
-  conversationId: string | null;
-  landingPath: string | null;
-}
-
-function composerNavigationIdentityFromUrl(value: string): ComposerNavigationIdentity | null {
-  try {
-    const url = new URL(value);
-    const conversationId = conversationIdFromUrl(url.href);
-    return {
-      origin: url.origin.toLowerCase(),
-      conversationId,
-      landingPath: conversationId === null ? url.pathname.replace(/\/+$/, "") || "/" : null,
-    };
-  } catch {
-    return null;
+  if (!delivery || (trusted ? !delivery.sawKeyDown : !delivery.clicked)) {
+    throw new BrowserAutomationError(
+      "Attachment menu activation could not be verified; do not retry automatically.",
+      { stage: "upload-attachment", code: "attachment-plus-ambiguous" },
+    );
   }
+  return { method: trusted ? "trusted-keyboard" : "synthetic", startUrl };
 }
 
 export async function uploadAttachmentFile(
@@ -262,7 +234,7 @@ export async function uploadAttachmentFile(
   },
   attachment: BrowserAttachment,
   logger: BrowserLogger,
-  options?: { expectedCount?: number },
+  options?: { expectedCount?: number; navigationUrl?: string },
 ): Promise<boolean> {
   const { runtime, dom, input } = deps;
   if (!dom) {
@@ -551,11 +523,11 @@ export async function uploadAttachmentFile(
 
   // Work suggestions sit close to the composer. Activate only the exact plus control and
   // verify that the page did not enter Work or another conversation before touching files.
-  const plusActivation = await activateComposerPlus(runtime, input);
+  const plusActivation = await activateComposerPlus(runtime, input, options?.navigationUrl);
+  const navigationUrl = options?.navigationUrl ?? plusActivation.startUrl;
+  const assertNavigation = () => assertComposerPlusStayedInPlace(runtime, navigationUrl);
   await delay(350);
-  if (plusActivation.method !== "unavailable") {
-    await assertComposerPlusStayedInPlace(runtime, plusActivation.startUrl);
-  }
+  await assertNavigation();
 
   const normalizeForMatch = (value: string): string =>
     String(value || "")
@@ -1201,16 +1173,23 @@ export async function uploadAttachmentFile(
         let attemptIssued = false;
         let evidenceId: string | undefined;
         if (!hasExpectedFile) {
+          await assertNavigation();
           evidenceId = await beginAttachmentEvidence(runtime, expectedName);
           if (mode === "set") {
-            await dom.setFileInputFiles({ nodeId: resultNode.nodeId, files: [attachment.path] });
+            await withGuardedFileInput(
+              runtime,
+              `input[type="file"][data-oracle-upload-idx="${idx}"]`,
+              navigationUrl,
+              () => dom.setFileInputFiles({ nodeId: resultNode.nodeId, files: [attachment.path] }),
+            );
             attemptIssued = true;
           } else {
             const selector = `input[type="file"][data-oracle-upload-idx="${idx}"]`;
             try {
-              await transferAttachmentViaDataTransfer(runtime, attachment, selector);
+              await transferAttachmentViaDataTransfer(runtime, attachment, selector, navigationUrl);
               attemptIssued = true;
             } catch (error) {
+              if (error instanceof BrowserAutomationError) throw error;
               logger(
                 `Attachment data transfer failed: ${(error as Error)?.message ?? String(error)}`,
               );
@@ -1245,22 +1224,11 @@ export async function uploadAttachmentFile(
       };
 
       const dispatchInputEvents = async () => {
-        await runtime
-          .evaluate({
-            expression: `(() => {
-              const input = document.querySelector('input[type="file"][data-oracle-upload-idx="${idx}"]');
-              if (!(input instanceof HTMLInputElement)) return false;
-              try {
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-                return true;
-              } catch {
-                return false;
-              }
-            })()`,
-            returnByValue: true,
-          })
-          .catch(() => undefined);
+        await dispatchGuardedFileInputEvents(
+          runtime,
+          `input[type="file"][data-oracle-upload-idx="${idx}"]`,
+          navigationUrl,
+        );
       };
 
       let result = await runInputAttempt("set");
@@ -1287,9 +1255,12 @@ export async function uploadAttachmentFile(
           break;
         }
         logger("Attachment input set; retrying with data transfer to trigger ChatGPT upload.");
-        await dom
-          .setFileInputFiles({ nodeId: resultNode.nodeId, files: [] })
-          .catch(() => undefined);
+        await assertNavigation();
+        await clearGuardedFileInput(
+          runtime,
+          `input[type="file"][data-oracle-upload-idx="${idx}"]`,
+          navigationUrl,
+        );
         await delay(150);
         result = await runInputAttempt("transfer");
         if (result.evaluation.status === "ui") {
@@ -1331,9 +1302,12 @@ export async function uploadAttachmentFile(
         break;
       }
       if (orderIndex < candidateOrder.length - 1) {
-        await dom
-          .setFileInputFiles({ nodeId: resultNode.nodeId, files: [] })
-          .catch(() => undefined);
+        await assertNavigation();
+        await clearGuardedFileInput(
+          runtime,
+          `input[type="file"][data-oracle-upload-idx="${idx}"]`,
+          navigationUrl,
+        );
         await delay(150);
       }
     }
@@ -1606,19 +1580,7 @@ export async function waitForAttachmentCompletion(
         button.getAttribute('data-disabled') === 'true' ||
         window.getComputedStyle(button).pointerEvents === 'none'
       : null;
-    const uploadingSelectors = ${JSON.stringify(UPLOAD_STATUS_SELECTORS)};
-    const uploading = uploadingSelectors.some((selector) => {
-      return Array.from(document.querySelectorAll(selector)).some((node) => {
-        const ariaBusy = node.getAttribute?.('aria-busy');
-        const dataState = node.getAttribute?.('data-state');
-        if (ariaBusy === 'true' || dataState === 'loading' || dataState === 'uploading' || dataState === 'pending') {
-          return true;
-        }
-        // Avoid false positives from user prompts ("upload:") or generic UI copy; only treat explicit progress strings as uploading.
-        const text = node.textContent?.toLowerCase?.() ?? '';
-        return /\buploading\b/.test(text) || /\bprocessing\b/.test(text);
-      });
-    });
+    const uploading = ${buildAttachmentProgressExpression("composerRoot")};
     const attachmentChipSelectors = [
       '[data-testid*="chip"]',
       '[data-testid*="attachment"]',
@@ -1790,6 +1752,14 @@ export async function waitForAttachmentCompletion(
           );
         }
       }
+      if (value.uploading) {
+        attachmentMatchSince = null;
+        inputMatchSince = null;
+        inputOnlyReadySince = null;
+        inputOnlySignature = "";
+        await delay(250);
+        continue;
+      }
       const attachedNames = (value.attachedNames ?? [])
         .map((name) => name.toLowerCase().replace(/\s+/g, " ").trim())
         .filter(Boolean);
@@ -1820,7 +1790,7 @@ export async function waitForAttachmentCompletion(
       };
       const missing = expectedNormalized.filter((expected) => !matchesExpected(expected));
       if (missing.length === 0) {
-        const stableThresholdMs = value.uploading ? 3000 : 1500;
+        const stableThresholdMs = 1500;
         if (attachmentMatchSince === null) {
           attachmentMatchSince = Date.now();
         }
@@ -1870,7 +1840,7 @@ export async function waitForAttachmentCompletion(
       const inputStateOk = value.state === "ready" || value.state === "missing";
       const inputSeenNow = inputOnlyNamesSatisfied;
       const inputEvidenceOk = inputSeenNow;
-      const stableThresholdMs = value.uploading ? 3000 : 1500;
+      const stableThresholdMs = 1500;
       if (inputSeenNow && inputStateOk && inputEvidenceOk) {
         if (inputMatchSince === null) {
           inputMatchSince = Date.now();

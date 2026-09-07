@@ -23,6 +23,7 @@ function fixture() {
       "HTMLInputElement",
       "window",
       "globalThis",
+      "location",
       `return ${expression};`,
     )(
       document,
@@ -30,6 +31,7 @@ function fixture() {
       FakeInputElement,
       { getComputedStyle: () => ({ pointerEvents: "auto" }) },
       renderer,
+      new URL("https://chatgpt.com/"),
     );
   const runtime = {
     evaluate: vi.fn(async ({ expression }: { expression: string }) => ({
@@ -67,9 +69,7 @@ describe("per-file attachment evidence", () => {
       const runtime = {
         evaluate: vi.fn(async ({ expression }: { expression: string }) => ({
           result: {
-            value: expression.includes("'#composer-plus-btn'")
-              ? f.evaluate(expression)
-              : { input: true },
+            value: expression.includes("location.href") ? f.evaluate(expression) : { input: true },
           },
         })),
       };
