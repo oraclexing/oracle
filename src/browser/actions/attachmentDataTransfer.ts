@@ -101,7 +101,7 @@ export async function transferAttachmentViaDataTransfer(
 
     if (guard && !guard.validate(true)) return navigationFailure();
     fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-    if (guard?.blocked) return navigationFailure();
+    if (guard && !guard.validate(true)) return navigationFailure();
     return { success: true, fileName: file.name, size: file.size };
     } finally { guard?.cleanup(); }
   })()`;

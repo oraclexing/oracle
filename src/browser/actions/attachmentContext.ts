@@ -234,6 +234,7 @@ export async function withGuardedFileInput(
       const guards = window.__oracleAttachmentInputGuards;
       const guard = guards?.[${JSON.stringify(id)}];
       if (!guard) return null;
+      guard.validate(true);
       const summary = { blocked: guard.blocked };
       guard.cleanup(); delete guards[${JSON.stringify(id)}]; return summary;
     })()`,
@@ -264,6 +265,7 @@ async function mutateGuardedFileInput(
     try {
       if (!guard.blocked) {
         ${events ? "input.dispatchEvent(new Event('input', { bubbles: true })); if (guard.validate()) input.dispatchEvent(new Event('change', { bubbles: true }));" : "input.value = '';"}
+        guard.validate(true);
       }
       return { blocked: guard.blocked };
     } finally { guard.cleanup(); }

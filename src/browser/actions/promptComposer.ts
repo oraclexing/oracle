@@ -22,6 +22,7 @@ import {
 } from "./attachments.js";
 import { buildComposerNavigationValidationExpression } from "./attachmentContext.js";
 import { buildClickDispatcher } from "./domEvents.js";
+import { stageAttachmentPrompt } from "./attachmentPrompt.js";
 import { BrowserAutomationError } from "../../oracle/errors.js";
 import { buildAttachmentEvidenceExpression } from "./attachmentEvidence.js";
 import { buildAttachmentProgressExpression } from "./attachmentProgress.js";
@@ -78,9 +79,13 @@ export async function submitPrompt(
   }
 
   await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
-  const encodedPrompt = JSON.stringify(prompt);
-  const focusResult = await runtime.evaluate({
-    expression: `(() => {
+  let observedLength: number;
+  if (hasAttachments) {
+    observedLength = await stageAttachmentPrompt(runtime, prompt, deps.attachmentNavigationUrl!);
+  } else {
+    const encodedPrompt = JSON.stringify(prompt);
+    const focusResult = await runtime.evaluate({
+      expression: `(() => {
       ${buildClickDispatcher()}
       const SELECTORS = ${JSON.stringify(INPUT_SELECTORS)};
       const isVisible = (node) => {
@@ -124,24 +129,24 @@ export async function submitPrompt(
       }
       return { focused: false };
     })()`,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-  if (!focusResult.result?.value?.focused) {
-    await logDomFailure(runtime, logger, "focus-textarea");
-    throw new Error("Failed to focus prompt textarea");
-  }
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    if (!focusResult.result?.value?.focused) {
+      await logDomFailure(runtime, logger, "focus-textarea");
+      throw new Error("Failed to focus prompt textarea");
+    }
 
-  await input.insertText({ text: prompt });
+    await input.insertText({ text: prompt });
 
-  // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
-  // before the send button becomes enabled; give it a short breather to avoid races.
-  await delay(500);
+    // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
+    // before the send button becomes enabled; give it a short breather to avoid races.
+    await delay(500);
 
-  const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
-  const fallbackSelectorLiteral = JSON.stringify(PROMPT_FALLBACK_SELECTOR);
-  const verification = await runtime.evaluate({
-    expression: `(() => {
+    const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
+    const fallbackSelectorLiteral = JSON.stringify(PROMPT_FALLBACK_SELECTOR);
+    const verification = await runtime.evaluate({
+      expression: `(() => {
       const editor = document.querySelector(${primarySelectorLiteral});
       const fallback = document.querySelector(${fallbackSelectorLiteral});
       const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
@@ -165,19 +170,19 @@ export async function submitPrompt(
         activeValue: active ? readValue(active) : '',
       };
     })()`,
-    returnByValue: true,
-  });
+      returnByValue: true,
+    });
 
-  const editorTextRaw = verification.result?.value?.editorText ?? "";
-  const fallbackValueRaw = verification.result?.value?.fallbackValue ?? "";
-  const activeValueRaw = verification.result?.value?.activeValue ?? "";
-  const editorTextTrimmed = editorTextRaw?.trim?.() ?? "";
-  const fallbackValueTrimmed = fallbackValueRaw?.trim?.() ?? "";
-  const activeValueTrimmed = activeValueRaw?.trim?.() ?? "";
-  if (!editorTextTrimmed && !fallbackValueTrimmed && !activeValueTrimmed) {
-    // Learned: occasionally Input.insertText doesn't land in the editor; force textContent/value + input events.
-    await runtime.evaluate({
-      expression: `(() => {
+    const editorTextRaw = verification.result?.value?.editorText ?? "";
+    const fallbackValueRaw = verification.result?.value?.fallbackValue ?? "";
+    const activeValueRaw = verification.result?.value?.activeValue ?? "";
+    const editorTextTrimmed = editorTextRaw?.trim?.() ?? "";
+    const fallbackValueTrimmed = fallbackValueRaw?.trim?.() ?? "";
+    const activeValueTrimmed = activeValueRaw?.trim?.() ?? "";
+    if (!editorTextTrimmed && !fallbackValueTrimmed && !activeValueTrimmed) {
+      // Learned: occasionally Input.insertText doesn't land in the editor; force textContent/value + input events.
+      await runtime.evaluate({
+        expression: `(() => {
         const fallback = document.querySelector(${fallbackSelectorLiteral});
         if (fallback) {
           fallback.value = ${encodedPrompt};
@@ -191,12 +196,11 @@ export async function submitPrompt(
           editor.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${encodedPrompt}, inputType: 'insertFromPaste' }));
         }
       })()`,
-    });
-  }
+      });
+    }
 
-  const promptLength = prompt.length;
-  const postVerification = await runtime.evaluate({
-    expression: `(() => {
+    const postVerification = await runtime.evaluate({
+      expression: `(() => {
       const editor = document.querySelector(${primarySelectorLiteral});
       const fallback = document.querySelector(${fallbackSelectorLiteral});
       const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
@@ -220,16 +224,18 @@ export async function submitPrompt(
         activeValue: active ? readValue(active) : '',
       };
     })()`,
-    returnByValue: true,
-  });
-  const observedEditor = postVerification.result?.value?.editorText ?? "";
-  const observedFallback = postVerification.result?.value?.fallbackValue ?? "";
-  const observedActive = postVerification.result?.value?.activeValue ?? "";
-  const observedLength = Math.max(
-    observedEditor.length,
-    observedFallback.length,
-    observedActive.length,
-  );
+      returnByValue: true,
+    });
+    const observedEditor = postVerification.result?.value?.editorText ?? "";
+    const observedFallback = postVerification.result?.value?.fallbackValue ?? "";
+    const observedActive = postVerification.result?.value?.activeValue ?? "";
+    observedLength = Math.max(
+      observedEditor.length,
+      observedFallback.length,
+      observedActive.length,
+    );
+  }
+  const promptLength = prompt.length;
   if (promptLength >= 50_000 && observedLength > 0 && observedLength < promptLength - 2_000) {
     // Learned: very large prompts can truncate silently; fail fast so we can fall back to file uploads.
     await logDomFailure(runtime, logger, "prompt-too-large");

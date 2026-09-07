@@ -41,7 +41,7 @@ for (const name of files) await fs.writeFile(path.join(root, name), png);
 const page = (
   mode,
 ) => `<!doctype html><meta charset="utf-8"><title>Oracle attachment safety fixture</title>
-<style>body{font:18px system-ui;margin:30px}textarea{width:600px;height:100px}button{padding:8px}#chips{min-height:60px}article{padding:12px}.tile{display:inline-block;margin:4px}img{width:30px;height:30px}</style>
+<style>body{font:18px system-ui;margin:30px}#prompt-textarea{width:600px;min-height:100px;white-space:pre-wrap}button{padding:8px}#chips{min-height:60px}article{padding:12px}.tile{display:inline-block;margin:4px}img{width:30px;height:30px}</style>
 <h1>Oracle attachment safety fixture</h1><p>Synthetic page and files; no provider account.</p>
 <button data-testid="profile-button">Synthetic profile</button><button data-testid="model-switcher-dropdown-button">GPT-5.5</button>
 <button type="button" role="radio" data-mode="chat" aria-checked="${mode === "localized-work" ? "false" : "true"}">${mode.startsWith("localized") ? "Unterhaltung" : "Chat"}</button>
@@ -50,17 +50,24 @@ ${mode === "machine-work" ? '<button type="button" data-mode="work" data-state="
 ${mode === "localized-chat" ? '<button type="button" aria-pressed="true">Work</button>' : ""}
 <a class="__menu-item" href="/c/fixture-initial" aria-label="Synthetic Chat">Synthetic Chat</a>
 <aside><div data-state="uploading">Unrelated activity</div></aside>
-<main><div id="turns"></div><form data-testid="composer"><textarea id="prompt-textarea" name="prompt-textarea" placeholder="Ask anything"></textarea>
+<main><div id="turns"></div><form data-testid="composer">${mode.startsWith("contenteditable") ? '<div id="prompt-textarea" contenteditable="true" role="textbox" data-placeholder="Ask anything"></div>' : '<textarea id="prompt-textarea" name="prompt-textarea" placeholder="Ask anything"></textarea>'}
 <button type="button" ${mode.startsWith("generic-plus") ? 'id="unrelated-plus" aria-label="Add suggestion"' : 'id="composer-plus-btn"'} aria-expanded="false">+</button>
 <input id="upload" type="file"><div id="chips"></div><div id="progress" style="display:none" data-state="uploading">Uploading</div>
 <button type="button" ${mode === "missing-send" ? 'aria-label="Send prompt"' : 'data-testid="send-button"'} id="send">Send</button></form></main>
 <script>
 const mode=${JSON.stringify(mode)};const state={mode,assignments:[],sends:0,editorEnters:0,genericClicks:0,sendKeys:[],busy:false,focusRecoveries:0};
 const report=()=>fetch('/events/'+mode,{method:'POST',body:JSON.stringify(state)});
-const editor=document.querySelector('textarea'), send=document.querySelector('#send'), progress=document.querySelector('#progress');
+const editor=document.querySelector('#prompt-textarea'), send=document.querySelector('#send'), progress=document.querySelector('#progress');
+if(mode.startsWith('contenteditable'))Object.defineProperty(editor,'value',{get(){return this.innerText;},set(value){this.textContent=value;}});
 let uploads=[];let busyTimer;
 function busy(){clearTimeout(busyTimer);state.busy=true;progress.style.display='block';report();busyTimer=setTimeout(()=>{state.busy=false;progress.style.display='none';report();},3500);}
-document.querySelector('#upload').onchange=async event=>{
+const fileInput=document.querySelector('#upload');
+if(mode.endsWith('file-handler-switch')){
+ const value=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');
+ Object.defineProperty(fileInput,'value',{get(){return value.get.call(this);},set(next){value.set.call(this,next);if(state.fileHandlerRan){state.selectionAfterHandler=this.files.length;report();}}});
+}
+fileInput.onchange=async event=>{
+ if(mode.endsWith('file-handler-switch')){state.fileHandlerRan=true;state.selectionAfterHandler=event.target.files.length;history.replaceState({},'', '/g/project-b/project?mode='+mode);report();return;}
  for(const file of Array.from(event.target.files||[])){
   uploads.push(file);state.assignments.push({name:file.name,bytes:Array.from(new Uint8Array(await file.arrayBuffer()))});
   const tile=document.createElement('div');tile.className='tile';tile.dataset.testid='attachment-chip';
@@ -84,6 +91,10 @@ if(mode==='plus-boundary-focus'){
  const rect=plus.getBoundingClientRect.bind(plus);let triggered=false;
  plus.getBoundingClientRect=()=>{const value=rect();if(!triggered&&document.activeElement===plus){triggered=true;queueMicrotask(()=>{send.focus();report();});}return value;};
 }
+if(mode==='prompt-fallback'||mode==='contenteditable-fallback'){const exec=document.execCommand.bind(document);document.execCommand=(command,...args)=>{if(command==='insertText'){state.nativeInsertBlocked=(state.nativeInsertBlocked||0)+1;report();return false;}return exec(command,...args);};}
+if(mode==='prompt-handler-switch')editor.addEventListener('input',()=>{if(state.assignments.length===2){history.replaceState({},'', '/g/project-b/project?mode='+mode);queueMicrotask(()=>{state.stagedPromptLength=editor.value.length;report();});}});
+if(mode==='prompt-focus-switch'){const focus=editor.focus.bind(editor);editor.focus=(...args)=>{focus(...args);if(state.assignments.length===2){history.replaceState({},'', '/g/project-b/project?mode='+mode);report();}};}
+if(mode==='prompt-input-switch')window.addEventListener('beforeinput',event=>{if(event.target===editor&&state.assignments.length===2){history.replaceState({},'', '/g/project-b/project?mode='+mode);report();}},true);
 if(mode==='focus-recovery')send.addEventListener('focus',()=>queueMicrotask(()=>{state.focusRecoveries++;editor.focus();report();}),{once:true});
 if(mode==='readiness-recovery')send.addEventListener('focus',busy,{once:true});
 function commit(){
@@ -228,6 +239,13 @@ const cases = [
     "localized-chat",
     "plus-focus-race",
     "plus-boundary-focus",
+    "prompt-focus-switch",
+    "prompt-input-switch",
+    "prompt-handler-switch",
+    "file-handler-switch",
+    "prompt-fallback",
+    "contenteditable",
+    "contenteditable-fallback",
     "work",
     "missing-send",
     "same-conversation",
@@ -238,9 +256,13 @@ const cases = [
   { mode: "generic-plus", route: "local" },
   { mode: "generic-plus-switch", route: "local" },
   { mode: "native-assignment-switch", route: "local" },
+  { mode: "native-file-handler-switch", route: "local" },
 ];
 try {
-  for (const run of cases) {
+  const selectedCase = option("--case");
+  const selectedCases = cases.filter((run) => !selectedCase || run.mode === selectedCase);
+  assert.ok(selectedCases.length, "Unknown proof case");
+  for (const run of selectedCases) {
     const name = `${run.baseline ? "baseline" : "candidate"}-${run.route}-${run.mode}`;
     const home = path.join(root, name);
     await fs.mkdir(home);
@@ -252,7 +274,7 @@ try {
     const initialPath =
       run.mode === "same-conversation" ? "/c/fixture-initial" : "/g/project-a/project";
     const args = [
-      run.baseline ? baseline : path.join(repo, "dist/bin/oracle-cli.js"),
+      run.baseline ? baseline : (option("--cli") ?? path.join(repo, "dist/bin/oracle-cli.js")),
       "--engine",
       "browser",
       "--model",
@@ -352,6 +374,11 @@ try {
           "machine-work",
           "plus-focus-race",
           "plus-boundary-focus",
+          "prompt-focus-switch",
+          "prompt-input-switch",
+          "prompt-handler-switch",
+          "file-handler-switch",
+          "native-file-handler-switch",
           "generic-plus-switch",
           "work",
           "missing-send",
@@ -360,6 +387,8 @@ try {
       assert.equal(state.sends, refused ? 0 : 1, JSON.stringify(state));
       assert.equal(state.editorEnters, 0, JSON.stringify(state));
       assert.equal(state.genericClicks, 0, JSON.stringify(state));
+      if (run.mode.endsWith("fallback")) assert.ok(state.nativeInsertBlocked > 0);
+      if (run.mode.endsWith("file-handler-switch")) assert.equal(state.selectionAfterHandler, 0);
       if (run.baseline) assert.ok(state.sentUrl.includes("/project-b/"), JSON.stringify(state));
       else if (!refused) {
         assert.equal(state.sentWhileBusy, false, JSON.stringify(state));
@@ -386,6 +415,8 @@ try {
             "native-assignment-switch",
             "localized-work",
             "machine-work",
+            "file-handler-switch",
+            "native-file-handler-switch",
             "plus-focus-race",
             "plus-boundary-focus",
           ].includes(run.mode) ||
