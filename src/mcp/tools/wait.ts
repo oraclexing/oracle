@@ -1,4 +1,4 @@
-import { watch } from "node:fs";
+import { realpathSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
@@ -102,7 +102,8 @@ export function createSessionChangeSource(directory: string): SessionChangeSourc
   };
 
   try {
-    watcher = watch(directory);
+    // Windows short-path aliases can trigger a native libuv prefix assertion.
+    watcher = watch(realpathSync.native(directory));
     watcher.on("change", onWake);
     watcher.on("error", onError);
   } catch {

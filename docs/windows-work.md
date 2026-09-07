@@ -10,6 +10,7 @@ Read this file whenever you're working from Windows and add new findings so the 
 - WSL browser launch host detection: a systemd-resolved stub such as `nameserver 127.0.0.53` is guest loopback, not the Windows host. Keep resolver-derived non-loopback hosts for Windows Chrome compatibility, but route resolver-derived `127/8` values to the standard local Chrome launcher.
 - Detached session workers launched by either CLI or MCP must use the shared launcher with `windowsHide: true`; a bounded MCP `wait` releases only the waiter and leaves that hidden worker running.
 - A waiter can read `meta.json` while the detached worker atomically replaces it. Windows may transiently reject that replacement with `EPERM`, `EBUSY`, or `EACCES`; retry only those lock-like errors with a short bounded backoff.
+- Resolve the session directory with `realpathSync.native` before `fs.watch`; Windows short-path aliases can otherwise hit a native libuv path-prefix assertion instead of a catchable watcher error.
 
 Future Windows gotchas belong here. Update this doc when you learn something new.
 
