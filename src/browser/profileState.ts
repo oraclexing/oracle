@@ -190,7 +190,7 @@ function isChromeCommandForUserDataDir(command: string | null, userDataDir: stri
 
 function startsWithChromeExecutable(command: string): boolean {
   const names =
-    /^(?:google chrome(?: canary)?|google-chrome(?:-stable)?|chrome|chromium|chromium-browser|chrome-headless-shell)(?:\.exe)?$/iu;
+    /^(?:google chrome(?: canary| beta| dev| for testing)?|google-chrome(?:-stable|-beta|-dev|-unstable)?|chrome|chromium|chromium-browser|chrome-headless-shell)(?:\.exe)?$/iu;
   const trimmed = command.trimStart();
   const quoted = trimmed.match(/^(?:"([^"]+)"|'([^']+)')(?=\s|$)/u);
   let executable: string;
@@ -202,7 +202,14 @@ function startsWithChromeExecutable(command: string): boolean {
     // macOS ps leaves the standard Google Chrome bundle path unquoted. Other
     // whitespace is ambiguous with argv entries; never mistake a later argument
     // named chrome for the executable that owns this PID.
-    if (/\s/u.test(executable.replace(/google chrome(?: canary)?(?:\.app)?/giu, "chrome")))
+    if (
+      /\s/u.test(
+        executable.replace(
+          /google chrome(?: canary| beta| dev| for testing)?(?:\.app)?/giu,
+          "chrome",
+        ),
+      )
+    )
       return false;
   }
   return names.test(executable.split(/[\\/]/u).at(-1) ?? "");

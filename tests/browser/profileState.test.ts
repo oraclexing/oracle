@@ -297,6 +297,29 @@ test("refuses ambiguous duplicate profile arguments", async () => {
   ).toBe(false);
 });
 
+test.each([
+  "google-chrome-beta",
+  "google-chrome-dev",
+  "google-chrome-unstable",
+  "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+  "/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev",
+  "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+])("recognizes the configured Chrome channel executable %s", (executable) => {
+  const profile = path.resolve("shared profile");
+  expect(
+    profileState.isChromeCommandForUserDataDirForTest(
+      `${executable} --user-data-dir="${profile}" --remote-debugging-port=9222`,
+      profile,
+    ),
+  ).toBe(true);
+  expect(
+    profileState.isChromeCommandForUserDataDirForTest(
+      `node ${executable} --user-data-dir="${profile}"`,
+      profile,
+    ),
+  ).toBe(false);
+});
+
 test.each(["--remote-debugging-port=9222", "about:blank"])(
   "preserves spaces before POSIX argument %s",
   async (suffix) => {
