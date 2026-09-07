@@ -204,6 +204,18 @@ describe("hidden-window launch flags", () => {
     }
   });
 
+  test("detaches only shared Windows profiles, never temporary or copied profiles", async () => {
+    const { shouldDetachSharedChromeForTest } =
+      await import("../../src/browser/chromeLifecycle.js");
+    expect(shouldDetachSharedChromeForTest({ manualLogin: true }, "win32")).toBe(true);
+    expect(shouldDetachSharedChromeForTest({ manualLogin: false }, "win32")).toBe(false);
+    expect(
+      shouldDetachSharedChromeForTest({ manualLogin: true, copyProfileSource: "source" }, "win32"),
+    ).toBe(false);
+    expect(shouldDetachSharedChromeForTest({ manualLogin: true }, "linux")).toBe(false);
+    expect(shouldDetachSharedChromeForTest({ manualLogin: true }, "darwin")).toBe(false);
+  });
+
   test("detaches Windows Chrome from the controller process without opening a console", async () => {
     const { resolveChromeChildSpawnOptionsForTest } =
       await import("../../src/browser/chromeLifecycle.js");
@@ -455,6 +467,104 @@ describe("connectWithNewTab", () => {
     await expect(
       connectWithNewTab(9222, logger, undefined, undefined, { fallbackToDefault: false }),
     ).rejects.toThrow(/isolated browser tab/i);
+    expect(cdpMock).not.toHaveBeenCalled();
+  });
+
+  test("remote new-task failure never attaches an unrelated conversation", async () => {
+    cdpNewMock.mockRejectedValue(new Error("cannot create tab"));
+    const { connectToRemoteChrome } = await import("../../src/browser/chromeLifecycle.js");
+    await expect(
+      connectToRemoteChrome(
+        "127.0.0.1",
+        9222,
+        vi.fn<(message: string) => void>(),
+        "about:blank",
+        undefined,
+        {
+          fallbackToDefault: false,
+        },
+      ),
+    ).rejects.toThrow(/unrelated conversation/);
+    expect(cdpMock).not.toHaveBeenCalled();
+  });
+
+  test("strict remote mode also forbids default-target fallback when the URL is omitted", async () => {
+    cdpNewMock.mockRejectedValue(new Error("cannot create tab"));
+    const { connectToRemoteChrome } = await import("../../src/browser/chromeLifecycle.js");
+    await expect(
+      connectToRemoteChrome(
+        "127.0.0.1",
+        9222,
+        vi.fn<(message: string) => void>(),
+        undefined,
+        undefined,
+        { fallbackToDefault: false },
+      ),
+    ).rejects.toThrow(/unrelated conversation/);
+    expect(cdpNewMock).toHaveBeenCalledWith({ host: "127.0.0.1", port: 9222, url: "about:blank" });
+    expect(cdpMock).not.toHaveBeenCalled();
+  });
+
+  test("strict remote attachment failure closes only its new target", async () => {
+    cdpNewMock.mockResolvedValue({ id: "owned-new-tab" });
+    cdpMock.mockRejectedValueOnce(new Error("attach failed"));
+    cdpCloseMock.mockResolvedValue(undefined);
+    const { connectToRemoteChrome } = await import("../../src/browser/chromeLifecycle.js");
+    await expect(
+      connectToRemoteChrome(
+        "127.0.0.1",
+        9222,
+        vi.fn<(message: string) => void>(),
+        "about:blank",
+        undefined,
+        { fallbackToDefault: false },
+      ),
+    ).rejects.toThrow(/unrelated conversation/);
+    expect(cdpMock).toHaveBeenCalledTimes(1);
+    expect(cdpMock).toHaveBeenCalledWith(expect.objectContaining({ target: "owned-new-tab" }));
+    expect(cdpCloseMock).toHaveBeenCalledWith({
+      host: "127.0.0.1",
+      port: 9222,
+      id: "owned-new-tab",
+    });
+  });
+
+  test("strict remote connection returns its dedicated target when available", async () => {
+    cdpNewMock.mockResolvedValue({ id: "owned-success" });
+    const client = { close: vi.fn().mockResolvedValue(undefined) };
+    cdpMock.mockResolvedValue(client);
+    cdpCloseMock.mockResolvedValue(undefined);
+    const { connectToRemoteChrome } = await import("../../src/browser/chromeLifecycle.js");
+    const result = await connectToRemoteChrome(
+      "127.0.0.1",
+      9222,
+      vi.fn<(message: string) => void>(),
+      "about:blank",
+      undefined,
+      { fallbackToDefault: false },
+    );
+    expect(result.targetId).toBe("owned-success");
+    expect(result.client).toBe(client);
+    await result.close();
+    expect(client.close).toHaveBeenCalledTimes(1);
+    expect(cdpCloseMock).toHaveBeenCalledWith({
+      host: "127.0.0.1",
+      port: 9222,
+      id: "owned-success",
+    });
+  });
+
+  test("ordinary remote runs never connect to the default tab after target creation fails", async () => {
+    cdpNewMock.mockRejectedValue(new Error("cannot create tab"));
+    const { runBrowserMode } = await import("../../src/browser/index.js");
+    await expect(
+      runBrowserMode({
+        prompt: "A new isolated task",
+        config: { remoteChrome: { host: "127.0.0.1", port: 9222 }, manualLogin: false },
+        log: vi.fn<(message: string) => void>(),
+      }),
+    ).rejects.toThrow(/unrelated conversation/);
+    expect(cdpNewMock).toHaveBeenCalled();
     expect(cdpMock).not.toHaveBeenCalled();
   });
 

@@ -48,6 +48,7 @@ import {
 import { INPUT_SELECTORS } from "./constants.js";
 import { uploadAttachmentViaDataTransfer } from "./actions/remoteFileTransfer.js";
 import { ensureThinkingTime } from "./actions/thinkingTime.js";
+import { throwIfAssistantUiError } from "./actions/assistantResponse.js";
 import { startThinkingStatusMonitor } from "./actions/thinkingStatus.js";
 import {
   activateDeepResearch,
@@ -156,7 +157,9 @@ function isCloudflareChallengeError(error: unknown): error is BrowserAutomationE
 function isReattachableCaptureError(error: unknown): error is BrowserAutomationError {
   if (!(error instanceof BrowserAutomationError)) return false;
   const stage = (error.details as { stage?: string } | undefined)?.stage;
-  return stage === "assistant-timeout" || stage === "assistant-recheck";
+  return (
+    stage === "assistant-timeout" || stage === "assistant-recheck" || stage === "assistant-ui-error"
+  );
 }
 
 type PreservedBrowserErrorKind = "cloudflare-challenge" | "reattachable-capture";
@@ -620,6 +623,7 @@ async function pollGeneratedImageOrTextAssistantResponse(
     let snapshot = await readAssistantSnapshot(Runtime, minTurnIndex, expectedConversationId).catch(
       () => null,
     );
+    throwIfAssistantUiError(snapshot);
     if (!snapshot && typeof minTurnIndex === "number" && Number.isFinite(minTurnIndex)) {
       const relaxedSnapshot = await readAssistantSnapshot(
         Runtime,
@@ -627,7 +631,10 @@ async function pollGeneratedImageOrTextAssistantResponse(
         expectedConversationId,
       ).catch(() => null);
       const relaxedHtml = typeof relaxedSnapshot?.html === "string" ? relaxedSnapshot.html : "";
-      if (relaxedHtml.includes("/backend-api/estuary/content?id=file_")) {
+      if (
+        !relaxedSnapshot?.uiError &&
+        relaxedHtml.includes("/backend-api/estuary/content?id=file_")
+      ) {
         snapshot = relaxedSnapshot;
       }
     }
@@ -791,6 +798,7 @@ async function captureDeepResearchTargetBaseline(
 type BrowserSubmissionFallback = {
   prompt: string;
   attachments: BrowserAttachment[];
+  prepare?: () => Promise<void>;
 };
 
 async function runSubmissionWithRecovery({
@@ -828,12 +836,15 @@ async function runSubmissionWithRecovery({
 
       const isPromptTooLarge = hasBrowserErrorCode(error, "prompt-too-large");
       if (fallbackSubmission && isPromptTooLarge && !usedFallbackSubmission) {
+        usedFallbackSubmission = true;
+        logger("[browser] Inline prompt too large; retrying with file uploads.");
+        if (fallbackSubmission.prepare) {
+          await fallbackSubmission.prepare();
+        }
         assertUniqueAttachmentBasenames(fallbackSubmission.attachments, {
           stage: "upload-fallback",
           subject: "The inline prompt was too large, but its upload fallback",
         });
-        usedFallbackSubmission = true;
-        logger("[browser] Inline prompt too large; retrying with file uploads.");
         await prepareFallbackSubmission();
         currentPrompt = fallbackSubmission.prompt;
         currentAttachments = fallbackSubmission.attachments;
@@ -1942,6 +1953,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
           baselineTurns ?? undefined,
           expectedConversationId(),
         ).catch(() => null);
+        throwIfAssistantUiError(snapshot);
         const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
         if (text) {
           const normalized = normalizeForComparison(text);
@@ -2233,6 +2245,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
             baselineTurns ?? undefined,
             expectedConversationId(),
           ).catch(() => null);
+          throwIfAssistantUiError(snapshot);
           const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
           const isStillEcho = !text || Boolean(promptEchoMatcher?.isEcho(text));
           if (!isStillEcho) {
@@ -2265,6 +2278,7 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
             baselineTurns ?? undefined,
             expectedConversationId(),
           ).catch(() => null);
+          throwIfAssistantUiError(snapshot);
           const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
           if (text && text.length > bestText.length) {
             bestText = text;
@@ -3136,6 +3150,7 @@ async function runRemoteBrowserMode(
         browserWSEndpoint,
         {
           approvalWaitMs: config.attachRunning && browserWSEndpoint ? 20_000 : undefined,
+          fallbackToDefault: false,
         },
       );
       client = connection.client;
@@ -3477,6 +3492,7 @@ async function runRemoteBrowserMode(
           baselineTurns ?? undefined,
           expectedConversationId(),
         ).catch(() => null);
+        throwIfAssistantUiError(snapshot);
         const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
         if (text) {
           const normalized = normalizeForComparison(text);
@@ -3756,6 +3772,7 @@ async function runRemoteBrowserMode(
             baselineTurns ?? undefined,
             expectedConversationId(),
           ).catch(() => null);
+          throwIfAssistantUiError(snapshot);
           const text = typeof snapshot?.text === "string" ? snapshot.text.trim() : "";
           const isStillEcho = !text || Boolean(promptEchoMatcher?.isEcho(text));
           if (!isStillEcho) {
@@ -4044,6 +4061,7 @@ export const __test__ = {
   isImageOnlyUiChromeText,
   listIgnoredRemoteChromeFlags,
   normalizeAuthenticatedModelSelectionError,
+  pollGeneratedImageOrTextAssistantResponse,
   resolveManualLoginWaitMs,
   shouldApplyThinkingTimeSelection,
   shouldCleanupBlankTabsAfterLastLease,

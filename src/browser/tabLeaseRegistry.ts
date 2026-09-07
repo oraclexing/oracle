@@ -1,7 +1,17 @@
 import path from "node:path";
 import net from "node:net";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  rmdir,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import type { BrowserLogger } from "./types.js";
 import { isProcessAlive, readProcessStartTimeMs } from "./profileState.js";
 import { delay } from "./utils.js";
@@ -308,26 +318,14 @@ export async function hasOtherActiveBrowserTabLeases(
 async function withRegistryLock<T>(profileDir: string, callback: () => Promise<T>): Promise<T> {
   const lockDir = path.join(profileDir, REGISTRY_LOCK_DIRNAME);
   const lockId = randomUUID();
-  const candidateDir = `${lockDir}.${lockId}`;
   const processStartedAtMs = await readProcessStartTimeMs(process.pid);
   const startedAt = Date.now();
   for (;;) {
     try {
-      await mkdir(candidateDir, { recursive: false });
-      await writeFile(
-        path.join(candidateDir, REGISTRY_LOCK_OWNER_FILENAME),
-        `${JSON.stringify({
-          id: lockId,
-          pid: process.pid,
-          createdAt: new Date().toISOString(),
-          ...(processStartedAtMs === null ? {} : { processStartedAtMs }),
-        })}\n`,
-        "utf8",
-      );
-      await rename(candidateDir, lockDir);
-      break;
+      // mkdir is exclusive on every platform; rename can replace a live empty
+      // directory on POSIX (including locks held by older Oracle controllers).
+      await mkdir(lockDir, { recursive: false });
     } catch (error) {
-      await rm(candidateDir, { recursive: true, force: true }).catch(() => undefined);
       const code = (error as { code?: string }).code;
       if (code !== "EEXIST" && code !== "EPERM" && code !== "ENOTEMPTY") {
         throw error;
@@ -337,7 +335,7 @@ async function withRegistryLock<T>(profileDir: string, callback: () => Promise<T
         await recoverDeadRegistryLock(profileDir, lockDir, owner);
         continue;
       }
-      if (!owner) {
+      if (!owner && (await isRegistryOwnerFileMissing(lockDir))) {
         const identity = await readRegistryLockIdentity(lockDir);
         if (identity && Date.now() - identity.mtimeMs >= LEGACY_OWNERLESS_LOCK_STALE_MS) {
           await recoverOwnerlessRegistryLock(profileDir, lockDir, identity);
@@ -350,7 +348,40 @@ async function withRegistryLock<T>(profileDir: string, callback: () => Promise<T
         );
       }
       await delay(50);
+      continue;
     }
+    const acquiredIdentity = await readRegistryLockIdentity(lockDir);
+    const temporaryOwner = path.join(lockDir, `${lockId}.tmp`);
+    try {
+      // Publish only complete ownership evidence. A crash before rename leaves
+      // an ownerless lock, which the aged-lock recovery path can safely reclaim.
+      await writeFile(
+        temporaryOwner,
+        `${JSON.stringify({
+          id: lockId,
+          pid: process.pid,
+          createdAt: new Date().toISOString(),
+          ...(processStartedAtMs === null ? {} : { processStartedAtMs }),
+        })}\n`,
+        { encoding: "utf8", flag: "wx" },
+      );
+      await renameRegistryFileWithRetry(
+        temporaryOwner,
+        path.join(lockDir, REGISTRY_LOCK_OWNER_FILENAME),
+      );
+    } catch (error) {
+      await rm(temporaryOwner, { force: true }).catch(() => undefined);
+      await removeRegistryLockIfOwned(lockDir, lockId).catch(() => undefined);
+      if (
+        acquiredIdentity &&
+        sameRegistryLockDirectory(await readRegistryLockIdentity(lockDir), acquiredIdentity)
+      ) {
+        // Only an unchanged empty directory can be removed without an owner.
+        await rmdir(lockDir).catch(() => undefined);
+      }
+      throw error;
+    }
+    break;
   }
   try {
     return await callback();
@@ -374,7 +405,7 @@ async function readRegistryLockOwner(
     if (
       typeof parsed.id !== "string" ||
       typeof parsed.pid !== "number" ||
-      !Number.isFinite(parsed.pid) ||
+      !Number.isSafeInteger(parsed.pid) ||
       parsed.pid <= 0 ||
       (parsed.processStartedAtMs !== undefined &&
         (typeof parsed.processStartedAtMs !== "number" ||
@@ -395,21 +426,39 @@ async function readRegistryLockOwner(
   }
 }
 
-async function isRegistryLockOwnerAlive(owner: RegistryLockOwner): Promise<boolean> {
-  if (!isProcessAlive(owner.pid)) return false;
-  const actualStartedAtMs = await readProcessStartTimeMs(owner.pid);
-  // Process introspection can be denied; fail closed if identity cannot be verified.
-  if (actualStartedAtMs === null) return true;
-  if (owner.processStartedAtMs === undefined) {
-    // Legacy owners only recorded lock creation time. A live process that started
-    // after the lock was created proves that the pid has since been reused.
-    const lockCreatedAtMs = owner.createdAt ? Date.parse(owner.createdAt) : Number.NaN;
-    return (
-      !Number.isFinite(lockCreatedAtMs) ||
-      actualStartedAtMs <= lockCreatedAtMs + PROCESS_START_TIME_TOLERANCE_MS
-    );
+async function isRegistryLockOwnerAlive(
+  owner: RegistryLockOwner,
+  deps = { isProcessAlive, readProcessStartTimeMs },
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const alive = deps.isProcessAlive(owner.pid);
+    const actualStartedAtMs = await deps.readProcessStartTimeMs(owner.pid);
+    // A positive independent identity probe outranks a transient native PID miss.
+    if (actualStartedAtMs !== null) {
+      if (owner.processStartedAtMs !== undefined) {
+        return (
+          Math.abs(actualStartedAtMs - owner.processStartedAtMs) <= PROCESS_START_TIME_TOLERANCE_MS
+        );
+      }
+      const createdAt = owner.createdAt ? Date.parse(owner.createdAt) : Number.NaN;
+      return (
+        !Number.isFinite(createdAt) ||
+        actualStartedAtMs <= createdAt + PROCESS_START_TIME_TOLERANCE_MS
+      );
+    }
+    if (alive) return true;
+    if (attempt === 0) await delay(REGISTRY_RECOVERY_POLL_MS);
   }
-  return Math.abs(actualStartedAtMs - owner.processStartedAtMs) <= PROCESS_START_TIME_TOLERANCE_MS;
+  return false;
+}
+
+async function isRegistryOwnerFileMissing(lockDir: string): Promise<boolean> {
+  try {
+    await lstat(path.join(lockDir, REGISTRY_LOCK_OWNER_FILENAME));
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
 }
 
 async function readRegistryLockIdentity(lockDir: string): Promise<RegistryLockIdentity | null> {
@@ -430,12 +479,18 @@ function sameRegistryLockIdentity(
   left: RegistryLockIdentity | null,
   right: RegistryLockIdentity,
 ): boolean {
+  return sameRegistryLockDirectory(left, right) && left?.mtimeMs === right.mtimeMs;
+}
+
+function sameRegistryLockDirectory(
+  left: RegistryLockIdentity | null,
+  right: RegistryLockIdentity,
+): boolean {
   return (
     left !== null &&
     left.dev === right.dev &&
     left.ino === right.ino &&
-    left.birthtimeMs === right.birthtimeMs &&
-    left.mtimeMs === right.mtimeMs
+    left.birthtimeMs === right.birthtimeMs
   );
 }
 
@@ -536,7 +591,8 @@ async function recoverOwnerlessRegistryLock(
   observedIdentity: RegistryLockIdentity,
 ): Promise<void> {
   await withRegistryRecoveryLock(profileDir, async () => {
-    if (await readRegistryLockOwner(lockDir)) return;
+    if ((await readRegistryLockOwner(lockDir)) || !(await isRegistryOwnerFileMissing(lockDir)))
+      return;
     const currentIdentity = await readRegistryLockIdentity(lockDir);
     if (
       !sameRegistryLockIdentity(currentIdentity, observedIdentity) ||
@@ -655,8 +711,8 @@ async function writeRegistry(
   await mkdir(profileDir, { recursive: true });
   const destination = registryPath(profileDir);
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
   try {
+    await writeFile(temporary, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
     await renameRegistryFileWithRetry(temporary, destination);
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
@@ -701,34 +757,7 @@ async function pruneStaleLeases(
       active.push(lease);
       continue;
     }
-    if (!options.isProcessAlive(lease.pid)) continue;
-
-    // A live PID is insufficient because Windows can reuse it after the owner
-    // exits. Preserve the lease only when the live process is the same process
-    // that acquired it. Introspection failure remains fail closed.
-    const actualStartedAtMs = await options.readProcessStartTimeMs(lease.pid);
-    if (actualStartedAtMs === null) {
-      active.push(lease);
-      continue;
-    }
-    if (lease.processStartedAtMs !== undefined) {
-      if (
-        Math.abs(actualStartedAtMs - lease.processStartedAtMs) <= PROCESS_START_TIME_TOLERANCE_MS
-      ) {
-        active.push(lease);
-      }
-      continue;
-    }
-
-    // Legacy records predate processStartedAtMs. A process that started after
-    // lease creation proves PID reuse; otherwise preserve the ambiguous record.
-    const createdAt = Date.parse(lease.createdAt);
-    if (
-      !Number.isFinite(createdAt) ||
-      actualStartedAtMs <= createdAt + PROCESS_START_TIME_TOLERANCE_MS
-    ) {
-      active.push(lease);
-    }
+    if (await isRegistryLockOwnerAlive(lease, options)) active.push(lease);
   }
   return active;
 }
@@ -739,6 +768,8 @@ function isLeaseRecord(value: unknown): value is BrowserTabLeaseRecord {
   return (
     typeof record.id === "string" &&
     typeof record.pid === "number" &&
+    Number.isSafeInteger(record.pid) &&
+    record.pid > 0 &&
     (record.processStartedAtMs === undefined ||
       (typeof record.processStartedAtMs === "number" &&
         Number.isFinite(record.processStartedAtMs))) &&

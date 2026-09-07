@@ -9,6 +9,7 @@ import {
   normalizeMaxConcurrentTabs,
   removeRegistryLockIfOwnedForTest,
   type BrowserTabLeaseReleaseContext,
+  type BrowserTabLease,
 } from "../../src/browser/tabLeaseRegistry.js";
 
 describe("tabLeaseRegistry", () => {
@@ -21,28 +22,22 @@ describe("tabLeaseRegistry", () => {
 
   test("queues when the max concurrent tab limit is reached", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "oracle-tab-leases-"));
+    const leases: BrowserTabLease[] = [];
+    let pendingLease: Promise<BrowserTabLease> | undefined;
     try {
       const logger = vi.fn();
-      const first = await acquireBrowserTabLease(dir, {
-        maxConcurrentTabs: 3,
-        pollMs: 25,
-        timeoutMs: 500,
-        logger,
-      });
-      const second = await acquireBrowserTabLease(dir, {
-        maxConcurrentTabs: 3,
-        pollMs: 25,
-        timeoutMs: 500,
-        logger,
-      });
-      const third = await acquireBrowserTabLease(dir, {
-        maxConcurrentTabs: 3,
-        pollMs: 25,
-        timeoutMs: 500,
-        logger,
-      });
+      for (let index = 0; index < 3; index += 1) {
+        leases.push(
+          await acquireBrowserTabLease(dir, {
+            maxConcurrentTabs: 3,
+            pollMs: 25,
+            timeoutMs: 500,
+            logger,
+          }),
+        );
+      }
       let resolved = false;
-      const fourthPromise = acquireBrowserTabLease(dir, {
+      pendingLease = acquireBrowserTabLease(dir, {
         maxConcurrentTabs: 3,
         pollMs: 25,
         timeoutMs: 1000,
@@ -52,20 +47,22 @@ describe("tabLeaseRegistry", () => {
         return lease;
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 75));
+      await vi.waitFor(() => {
+        expect(logger).toHaveBeenCalledWith(
+          expect.stringContaining("Waiting for ChatGPT browser slot"),
+        );
+      });
       expect(resolved).toBe(false);
-      expect(logger).toHaveBeenCalledWith(
-        expect.stringContaining("Waiting for ChatGPT browser slot"),
-      );
 
-      await first.release();
-      const fourth = await fourthPromise;
+      await leases.shift()?.release();
+      leases.push(await pendingLease);
+      pendingLease = undefined;
       expect(resolved).toBe(true);
-
-      await second.release();
-      await third.release();
-      await fourth.release();
     } finally {
+      await Promise.all(leases.map((lease) => lease.release()));
+      // Drain the queued writer before removing its registry, even after a failed assertion.
+      const remaining = await pendingLease?.catch(() => undefined);
+      await remaining?.release();
       await rm(dir, { recursive: true, force: true });
     }
   });

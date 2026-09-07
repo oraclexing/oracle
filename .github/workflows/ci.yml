@@ -28,7 +28,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
       - run: pnpm run test
       - run: pnpm run build
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os != 'macos-latest'
+      - name: Prove shared Chrome controller lifetime on Windows
+        if: matrix.os == 'windows-latest'
+        run: node scripts/shared-chrome-lifecycle-proof.mjs
       - run: pnpm run test:packed-cli
         if: matrix.os == 'ubuntu-latest'
 
@@ -63,5 +66,7 @@ jobs:
           echo "CHROME_PATH=${CHROME_PATH}" >> "$GITHUB_ENV"
       - name: Run CDP disconnect classification proof
         run: node scripts/cdp-disconnect-proof.mjs
+      - name: Run shared Chrome lifecycle proof
+        run: node scripts/shared-chrome-lifecycle-proof.mjs
       - name: Run attachment send proof
         run: node scripts/attachment-send-proof.mjs

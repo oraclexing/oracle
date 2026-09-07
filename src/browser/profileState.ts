@@ -17,6 +17,7 @@ const CHROME_PID_FILENAME = "chrome.pid";
 const ORACLE_PROFILE_LOCK_FILENAME = "oracle-automation.lock";
 
 const execFileAsync = promisify(execFile);
+let ownProcessStartTime: Promise<number | null> | undefined;
 
 export function getDevToolsActivePortPaths(userDataDir: string): string[] {
   return DEVTOOLS_ACTIVE_PORT_RELATIVE_PATHS.map((relative) => path.join(userDataDir, relative));
@@ -143,6 +144,7 @@ export async function terminateRecordedChromeForProfile(
       await execFileAsync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
         maxBuffer: 1024 * 1024,
         windowsHide: true,
+        timeout: 5000,
       });
     } else {
       process.kill(pid, "SIGTERM");
@@ -169,9 +171,16 @@ export async function terminateRecordedChromeForProfile(
 
 function isChromeCommandForUserDataDir(command: string | null, userDataDir: string): boolean {
   if (!command) return false;
-  const match = command.match(/(?:^|\s)--user-data-dir(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s]+))/iu);
-  if (!match) return false;
-  const commandProfile = match[1] ?? match[2] ?? match[3];
+  // ps flattens POSIX argv: an unquoted profile may contain spaces, so its
+  // boundary is the next Chrome switch/startup URL or the end, not the first whitespace.
+  const matches = [
+    ...command.matchAll(
+      /(?:^|\s)(?:"--user-data-dir=([^"]*)"|--user-data-dir(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\r\n]+?)(?=\s+(?:"?--|about:blank(?:\s|$))|\s*$)))/giu,
+    ),
+  ];
+  if (matches.length !== 1) return false;
+  const match = matches[0]!;
+  const commandProfile = match[1] ?? match[2] ?? match[3] ?? match[4];
   if (!commandProfile || !startsWithChromeExecutable(command)) return false;
   return (
     normalizeProfilePathForComparison(commandProfile) ===
@@ -181,18 +190,26 @@ function isChromeCommandForUserDataDir(command: string | null, userDataDir: stri
 
 function startsWithChromeExecutable(command: string): boolean {
   const names =
-    "(?:google chrome(?: canary)?|google-chrome(?:-stable)?|chrome|chromium|chromium-browser|chrome-headless-shell)";
-  const bare = new RegExp(`^${names}(?:\\.exe)?(?=\\s--|\\s*$)`, "iu");
-  const rooted = new RegExp(
-    `^(?:"?(?:[a-z]:[\\\\/]|/|\\\\\\\\).*?[\\\\/]${names}(?:\\.exe)?"?)(?=\\s--|\\s*$)`,
-    "iu",
-  );
+    /^(?:google chrome(?: canary)?|google-chrome(?:-stable)?|chrome|chromium|chromium-browser|chrome-headless-shell)(?:\.exe)?$/iu;
   const trimmed = command.trimStart();
-  return bare.test(trimmed) || rooted.test(trimmed);
+  const quoted = trimmed.match(/^(?:"([^"]+)"|'([^']+)')(?=\s|$)/u);
+  let executable: string;
+  if (quoted) {
+    executable = quoted[1] ?? quoted[2]!;
+  } else {
+    const optionsStart = trimmed.search(/\s+"?--/u);
+    executable = optionsStart < 0 ? trimmed : trimmed.slice(0, optionsStart);
+    // macOS ps leaves the standard Google Chrome bundle path unquoted. Other
+    // whitespace is ambiguous with argv entries; never mistake a later argument
+    // named chrome for the executable that owns this PID.
+    if (/\s/u.test(executable.replace(/google chrome(?: canary)?(?:\.app)?/giu, "chrome")))
+      return false;
+  }
+  return names.test(executable.split(/[\\/]/u).at(-1) ?? "");
 }
 
 function normalizeProfilePathForComparison(value: string): string {
-  let normalized = path.normalize(path.resolve(value.trim()));
+  let normalized = path.normalize(path.resolve(value));
   if (process.platform === "win32") {
     normalized = normalized.replace(/^\\\\\?\\/u, "").toLowerCase();
   }
@@ -232,8 +249,14 @@ export function isProcessAlive(pid: number): boolean {
 export async function readProcessStartTimeMs(pid: number): Promise<number | null> {
   if (!Number.isFinite(pid) || pid <= 0) return null;
   if (Math.trunc(pid) === process.pid) {
-    return Date.now() - process.uptime() * 1000;
+    // Use the same OS identity as peer controllers, not wall time minus uptime.
+    // Cache our own PID only: it cannot be reused during this process's lifetime.
+    return (ownProcessStartTime ??= queryProcessStartTimeMs(process.pid));
   }
+  return queryProcessStartTimeMs(pid);
+}
+
+async function queryProcessStartTimeMs(pid: number): Promise<number | null> {
   try {
     const executable = process.platform === "win32" ? "powershell.exe" : "ps";
     const args =
@@ -248,6 +271,7 @@ export async function readProcessStartTimeMs(pid: number): Promise<number | null
     const { stdout } = await execFileAsync(executable, args, {
       maxBuffer: 1024 * 1024,
       windowsHide: true,
+      timeout: 5000,
     });
     const startedAt = Date.parse(String(stdout ?? "").trim());
     return Number.isFinite(startedAt) ? startedAt : null;
@@ -518,6 +542,7 @@ async function readProcessCommand(pid: number): Promise<string | null> {
     const { stdout } = await execFileAsync(executable, args, {
       maxBuffer: 1024 * 1024,
       windowsHide: true,
+      timeout: 5000,
     });
     const command = String(stdout ?? "").trim();
     return command || null;
