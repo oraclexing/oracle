@@ -1,6 +1,6 @@
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import type { ChildProcess } from "node:child_process";
 import { describe, expect, test, vi } from "vitest";
@@ -68,5 +68,30 @@ describe("detached session launcher", () => {
     expect(Buffer.concat(written).toString("utf8")).toBe("ready\n");
     expect(child.unref).toHaveBeenCalledTimes(1);
     expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  test("rejects a failed start gate without an unhandled stream error", async () => {
+    const brokenPipe = Object.assign(new Error("start gate closed"), { code: "EPIPE" });
+    const stdin = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(brokenPipe);
+      },
+    });
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4242,
+      stdin,
+      unref: vi.fn(),
+      kill: vi.fn(),
+    }) as unknown as ChildProcess;
+    const launched = launchDetachedSession({
+      sessionId: "failed-gate",
+      prepare: async () => undefined,
+      spawnProcess: () => child,
+    });
+    const rejection = expect(launched).rejects.toBe(brokenPipe);
+    child.emit("spawn");
+    await rejection;
+    expect(child.kill).toHaveBeenCalledOnce();
+    expect(child.unref).not.toHaveBeenCalled();
   });
 });

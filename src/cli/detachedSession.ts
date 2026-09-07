@@ -78,7 +78,14 @@ export function launchDetachedSession({
         if (!child.stdin) {
           throw new Error("Detached session worker started without a writable start gate.");
         }
-        child.stdin.end("ready\n");
+        const startGate = child.stdin;
+        await new Promise<void>((resolveGate, rejectGate) => {
+          startGate.once("error", rejectGate);
+          startGate.end("ready\n", (error?: Error) => {
+            if (error) rejectGate(error);
+            else resolveGate();
+          });
+        });
         child.unref();
         resolve(child.pid);
       } catch (error) {

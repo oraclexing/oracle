@@ -32,23 +32,26 @@ function fakeSource(waitImpl: SessionChangeSource["wait"] = async () => undefine
 }
 
 describe("waitForSessionTerminal", () => {
-  test("returns immediately for a terminal session", async () => {
-    const source = fakeSource();
-    source.create.mockReturnValue(source.source);
-    const deps: WaitForSessionDeps = {
-      readSession: vi.fn(async () => metadata("completed")),
-      getSessionDir: vi.fn(async () => "/tmp/session-1"),
-      createChangeSource: source.create,
-      now: () => 0,
-    };
+  test.each(["completed", "partial", "error", "cancelled"])(
+    "returns immediately for %s",
+    async (status) => {
+      const source = fakeSource();
+      source.create.mockReturnValue(source.source);
+      const deps: WaitForSessionDeps = {
+        readSession: vi.fn(async () => metadata(status)),
+        getSessionDir: vi.fn(async () => "/tmp/session-1"),
+        createChangeSource: source.create,
+        now: () => 0,
+      };
 
-    await expect(waitForSessionTerminal({ id: "session-1" }, deps)).resolves.toMatchObject({
-      metadata: { status: "completed" },
-      waitStatus: "terminal",
-      timedOut: false,
-    });
-    expect(source.create).not.toHaveBeenCalled();
-  });
+      await expect(waitForSessionTerminal({ id: "session-1" }, deps)).resolves.toMatchObject({
+        metadata: { status },
+        waitStatus: "terminal",
+        timedOut: false,
+      });
+      expect(source.create).not.toHaveBeenCalled();
+    },
+  );
 
   test("wakes on a session change and rereads durable metadata", async () => {
     const source = fakeSource();
@@ -144,6 +147,33 @@ describe("wait MCP result", () => {
   afterEach(() => {
     setOracleHomeDirOverrideForTest(null);
   });
+
+  test.each([-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects invalid caller timeout %s before opening a session",
+    async (timeoutMs) => {
+      await expect(runWaitTool({ id: "missing", timeoutMs })).rejects.toThrow();
+    },
+  );
+
+  test("observes durable completion on the real filesystem", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "oracle-wait-notify-"));
+    setOracleHomeDirOverrideForTest(home);
+    try {
+      const created = await sessionStore.createSession(
+        { prompt: "filesystem waiter", file: [], model: "gpt-5.4", mode: "api" },
+        home,
+      );
+      await sessionStore.updateSession(created.id, { status: "running" });
+      const waiting = waitForSessionTerminal({ id: created.id, timeoutMs: 3_000 });
+      await sessionStore.updateSession(created.id, { status: "completed" });
+      await expect(waiting).resolves.toMatchObject({
+        metadata: { status: "completed" },
+        waitStatus: "terminal",
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 5_000);
 
   test("returns terminal output and artifact summaries without another sessions call", async () => {
     const home = mkdtempSync(path.join(tmpdir(), "oracle-wait-"));
