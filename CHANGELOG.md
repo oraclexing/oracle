@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-- Browser: surface and persist live Deep Research plans, settle exhausted disconnected captures as reattachable partial sessions, and retry an unchanged staged text-only prompt once after send-commit timeout; attachment sends remain fail-closed without replay.
-
 ## 0.19.0 - 2026-09-07
 
 **Highlights:** Durable detached MCP consultations, modern and legacy MCP client support, and clearer browser capture failures with preserved recovery evidence.

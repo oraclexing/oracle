@@ -551,47 +551,6 @@ export async function performSessionRun({
       reattachGuidanceLogged = true;
       log(formatBrowserReattachGuidance(sessionMeta.id));
     };
-    const settleDisconnectedCapture = async (
-      runtime: BrowserRuntimeMetadata | null | undefined,
-      reason: string,
-    ): Promise<void> => {
-      const completedAt = new Date().toISOString();
-      const response = {
-        status: "incomplete",
-        incompleteReason: "chrome-disconnected",
-      } as const;
-      const errorMetadata = {
-        category: userError?.category ?? "browser-automation",
-        message: userError?.message ?? message,
-        details: userError?.details,
-      };
-      log(dim(`${reason}; marking session partial so terminal waits can return.`));
-      if (modelForStatus) {
-        await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
-          status: "partial",
-          completedAt,
-          response,
-          error: errorMetadata,
-        });
-      }
-      await sessionStore.updateSession(sessionMeta.id, {
-        status: "partial",
-        completedAt,
-        errorMessage: message,
-        mode,
-        browser: {
-          ...currentBrowser,
-          config: browserConfig,
-          runtime: {
-            ...currentBrowser?.runtime,
-            ...runtime,
-          },
-        },
-        response,
-        error: errorMetadata,
-      });
-      logBrowserReattachGuidance(runtime);
-    };
     if (connectionLost && mode === "browser" && browserCanReattach) {
       const runtime = (userError.details as { runtime?: BrowserRuntimeMetadata } | undefined)
         ?.runtime;
@@ -663,10 +622,6 @@ export async function performSessionRun({
           ?.recoverableDisconnect === true;
       if (!recoverableDisconnect) {
         log(dim("Skipping auto-reattach: disconnect classified as non-recoverable."));
-        await settleDisconnectedCapture(
-          recoverableRuntime,
-          "Browser disconnect is not recoverable in the current worker",
-        );
         return;
       }
       // Connection-lost should attempt the same recovery path as assistant-timeout.
@@ -697,10 +652,6 @@ export async function performSessionRun({
       if (success) {
         return;
       }
-      await settleDisconnectedCapture(
-        recoverableRuntime,
-        "Auto-reattach did not capture a completed response",
-      );
       return;
     }
     if (assistantTimeout && mode === "browser" && browserCanReattach) {

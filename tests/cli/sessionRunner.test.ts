@@ -1032,17 +1032,7 @@ describe("performSessionRun", () => {
     vi.mocked(runBrowserSessionExecution).mockResolvedValue({
       usage: { inputTokens: 100, outputTokens: 50, reasoningTokens: 0, totalTokens: 150 },
       elapsedMs: 2000,
-      runtime: {
-        chromePid: 123,
-        chromePort: 9222,
-        userDataDir: "/tmp/profile",
-        researchPlan: {
-          title: "Release status",
-          steps: ["Read official sources"],
-          phase: "researching",
-          capturedAt: "2026-09-02T00:00:00.000Z",
-        },
-      },
+      runtime: { chromePid: 123, chromePort: 9222, userDataDir: "/tmp/profile" },
       modelSelection: {
         requestedModel: "GPT-5.5 Pro",
         resolvedLabel: "Pro",
@@ -1080,10 +1070,7 @@ describe("performSessionRun", () => {
     expect(finalUpdate).toMatchObject({
       status: "completed",
       browser: expect.objectContaining({
-        runtime: expect.objectContaining({
-          chromePid: 123,
-          researchPlan: expect.objectContaining({ title: "Release status" }),
-        }),
+        runtime: expect.objectContaining({ chromePid: 123 }),
         modelSelection: expect.objectContaining({ resolvedLabel: "Pro" }),
         warnings: [expect.objectContaining({ code: "browser-pro-fast-large-run" })],
       }),
@@ -1479,7 +1466,7 @@ describe("performSessionRun", () => {
     });
   });
 
-  test("settles partial when one-shot browser reconnect cannot capture", async () => {
+  test("keeps session running when browser connection is lost", async () => {
     const automationError = new BrowserAutomationError(
       "Chrome DevTools client disconnected before oracle finished; the browser target appears still alive.",
       {
@@ -1529,8 +1516,8 @@ describe("performSessionRun", () => {
     expect(vi.mocked(resumeBrowserSession)).toHaveBeenCalledTimes(1);
     const finalUpdate = sessionStoreMock.updateSession.mock.calls.at(-1)?.[1];
     expect(finalUpdate).toMatchObject({
-      status: "partial",
-      response: { status: "incomplete", incompleteReason: "chrome-disconnected" },
+      status: "running",
+      response: { status: "running", incompleteReason: "chrome-disconnected" },
       browser: expect.objectContaining({
         runtime: expect.objectContaining({ chromePort: 9222 }),
         modelSelection: expect.objectContaining({ resolvedLabel: "Pro", verified: true }),
@@ -1539,7 +1526,7 @@ describe("performSessionRun", () => {
     expect(sessionStoreMock.updateModelRun).toHaveBeenCalledWith(
       baseSessionMeta.id,
       "gpt-5.2-pro",
-      expect.objectContaining({ status: "partial" }),
+      expect.objectContaining({ status: "running" }),
     );
     const logLines = log.mock.calls.map((c) => String(c[0])).join("\n");
     expect(logLines).toContain(
@@ -1564,19 +1551,7 @@ describe("performSessionRun", () => {
         },
       },
     );
-    vi.mocked(runBrowserSessionExecution).mockImplementationOnce(async (_args, deps) => {
-      await deps?.persistRuntimeHint?.({
-        chromePort: 9222,
-        chromeHost: "127.0.0.1",
-        tabUrl: "https://chatgpt.com/c/demo",
-        promptSubmitted: true,
-        researchPlan: {
-          title: "Captured plan",
-          steps: ["Read official sources"],
-          phase: "researching",
-          capturedAt: "2026-09-02T00:00:00.000Z",
-        },
-      });
+    vi.mocked(runBrowserSessionExecution).mockImplementationOnce(async () => {
       throw automationError;
     });
 
@@ -1596,13 +1571,8 @@ describe("performSessionRun", () => {
     expect(logLines).toContain("Skipping auto-reattach: disconnect classified as non-recoverable.");
     const finalUpdate = sessionStoreMock.updateSession.mock.calls.at(-1)?.[1];
     expect(finalUpdate).toMatchObject({
-      status: "partial",
-      response: { status: "incomplete", incompleteReason: "chrome-disconnected" },
-      browser: {
-        runtime: {
-          researchPlan: { title: "Captured plan" },
-        },
-      },
+      status: "running",
+      response: { status: "running", incompleteReason: "chrome-disconnected" },
     });
   });
 
@@ -1644,8 +1614,8 @@ describe("performSessionRun", () => {
     expect(logLines).toContain("Auto-reattach stopped after 1 attempt(s)");
     const finalUpdate = sessionStoreMock.updateSession.mock.calls.at(-1)?.[1];
     expect(finalUpdate).toMatchObject({
-      status: "partial",
-      response: { status: "incomplete", incompleteReason: "chrome-disconnected" },
+      status: "running",
+      response: { status: "running", incompleteReason: "chrome-disconnected" },
     });
   });
 
