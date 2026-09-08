@@ -1136,9 +1136,9 @@ async function runBrowserModeInternal(
   let lastTargetId: string | undefined;
   let lastUrl: string | undefined;
   let promptSubmitted = false;
-  let researchPlan: BrowserResearchPlanMetadata | undefined;
   let modelSelectionEvidence: BrowserModelSelectionEvidence | undefined;
   let thinkingSelectionEvidence: BrowserThinkingSelectionEvidence | undefined;
+  let researchPlan: BrowserResearchPlanMetadata | undefined;
   let tabLease: BrowserTabLease | null = null;
   let conversationUrlMonitor: ConversationUrlMonitor | null = null;
   const emitRuntimeHint = async (): Promise<void> => {
@@ -1154,9 +1154,9 @@ async function runBrowserModeInternal(
       tabUrl: lastUrl,
       conversationId,
       promptSubmitted,
-      researchPlan,
       userDataDir,
       controllerPid: process.pid,
+      researchPlan,
     };
     try {
       await runtimeHintCb?.(hint, modelSelectionEvidence);
@@ -1455,8 +1455,8 @@ async function runBrowserModeInternal(
                     ? extractConversationIdFromUrl(liveness.matchedUrl ?? lastUrl ?? "")
                     : undefined,
                 promptSubmitted,
-                researchPlan,
                 controllerPid: process.pid,
+                researchPlan,
               },
             }),
           );
@@ -2026,8 +2026,8 @@ async function runBrowserModeInternal(
         tabUrl: lastUrl,
         conversationId: lastUrl ? extractConversationIdFromUrl(lastUrl) : undefined,
         promptSubmitted,
-        researchPlan,
         controllerPid: process.pid,
+        researchPlan,
       };
     }
     // Helper to normalize text for echo detection (collapse whitespace, lowercase)
@@ -2654,8 +2654,8 @@ async function runBrowserModeInternal(
               ? extractConversationIdFromUrl(liveness.matchedUrl ?? lastUrl ?? "")
               : undefined,
           promptSubmitted,
-          researchPlan,
           controllerPid: process.pid,
+          researchPlan,
         },
       },
       normalizedError,
@@ -3171,9 +3171,9 @@ async function runRemoteBrowserMode(
   let tabLease: BrowserTabLease | null = null;
   let lastUrl: string | undefined;
   let promptSubmitted = false;
-  let researchPlan: BrowserResearchPlanMetadata | undefined;
   let modelSelectionEvidence: BrowserModelSelectionEvidence | undefined;
   let thinkingSelectionEvidence: BrowserThinkingSelectionEvidence | undefined;
+  let researchPlan: BrowserResearchPlanMetadata | undefined;
   let attachedExistingTab = false;
   let ownsTarget = true;
   let conversationUrlMonitor: ConversationUrlMonitor | null = null;
@@ -3191,8 +3191,8 @@ async function runRemoteBrowserMode(
           tabUrl: lastUrl,
           conversationId: lastUrl ? extractConversationIdFromUrl(lastUrl) : undefined,
           promptSubmitted,
-          researchPlan,
           controllerPid: process.pid,
+          researchPlan,
         },
         modelSelectionEvidence,
       );
@@ -3613,8 +3613,8 @@ async function runRemoteBrowserMode(
         tabUrl: lastUrl,
         conversationId: lastUrl ? extractConversationIdFromUrl(lastUrl) : undefined,
         promptSubmitted,
-        researchPlan,
         controllerPid: process.pid,
+        researchPlan,
       };
     }
     // Helper to normalize text for echo detection (collapse whitespace, lowercase)
@@ -4130,8 +4130,8 @@ async function runRemoteBrowserMode(
             ? extractConversationIdFromUrl(liveness.matchedUrl ?? lastUrl ?? "")
             : undefined,
         promptSubmitted,
-        researchPlan,
         controllerPid: process.pid,
+        researchPlan,
       },
     });
   } finally {

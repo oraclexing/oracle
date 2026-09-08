@@ -184,6 +184,8 @@ Oracle activates ChatGPT Deep Research through the composer tools menu, recogniz
 
 When the research frame exposes a plan, Oracle logs its visible title and steps and saves its latest planning/researching phase and Edit/Update action under `browser.runtime.researchPlan` in the session metadata. It begins monitoring as soon as the frame reports researching, without waiting out a fixed plan countdown. This optional observation does not change terminal session status or retry a submitted prompt.
 
+Remote-service results carry the optional plan with the completed answer. Plan log lines are available while the remote run is in progress; no new MCP wait event or terminal-status policy is introduced.
+
 If ChatGPT initially exposes only `Called tool` / `Used tool`, Oracle treats that as an incomplete capture for Deep Research rather than a final answer. Reattach the existing session with `oracle session <id> --render` so Oracle can recover the lazy-loaded report from the existing Chrome tab; do not rerun the research unless the browser session is unrecoverable.
 
 Deep Research is browser-only. It does not use connected apps in v1; give it public-web scope, uploaded files, and any domain/source guidance in the prompt. For deep thinking over code or architecture without web search, prefer a normal browser run with GPT-5.6 Sol and `--browser-thinking-time extra-high`, or a Pro model with `--browser-thinking-time extended`.
