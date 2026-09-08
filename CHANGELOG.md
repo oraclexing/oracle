@@ -30,7 +30,6 @@
 - Browser: recognize Korean picker labels and localized effort-label punctuation, including Japanese, without confusing High, Extra High, or Unicode word continuations. Fixes #423 and #440; thanks @Gabrielgvl and @kiyo-e.
 - Browser: recognize the Japanese 思考量 effort label and Japanese archive controls.
 - Browser: honor the requested thinking time during Deep Research.
-- Browser: recognize Chinese `深度研究` / `获取详细报告` composer controls when activating Deep Research, including the localized selected-tool pill and add-files fallback.
 - CLI: inherit browser.remoteChrome from user configuration while preserving explicit endpoints, attach-running destinations, and copy-profile choices; thanks @ShunmeiCho.
 - Browser: attach to running Chrome without DevToolsActivePort metadata, with IPv6 support and bounded endpoint retries. Fixes #414; thanks @devYRPauli.
 - Remote: preserve every attachment when upload basenames collide after sanitization. Fixes #387; thanks @postoso.

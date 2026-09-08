@@ -186,7 +186,11 @@ describe("Deep Research activation expression", () => {
     expect(expression).toContain("already-active");
   });
 
-  it("activates the Chinese Deep Research row without clicking the GitHub connector", async () => {
+  it.each([
+    ["深度研究 获取详细报告", "深度研究", "添加文件等"],
+    ["DeepResearch", "Deep research", "Add files and more"],
+    ["Deep Research Get a detailed report", "Deep research", "Add files and more"],
+  ])("activates %s without clicking the GitHub connector", async (row, pill, plusLabel) => {
     const expression = buildActivateDeepResearchExpressionForTest();
     let menuOpen = false;
     let activated = false;
@@ -243,14 +247,14 @@ describe("Deep Research activation expression", () => {
     }
 
     const popover = {};
-    const plusButton = new FakeElement("", "添加文件等", false, () => {
+    const plusButton = new FakeElement("", plusLabel, false, () => {
       menuOpen = true;
     });
     const githubRow = new FakeElement("GitHub 搜索和引用代码", "", true);
-    const deepResearchRow = new FakeElement("深度研究 获取详细报告", "", true, () => {
+    const deepResearchRow = new FakeElement(row, "", true, () => {
       activated = true;
     });
-    const deepResearchPill = new FakeElement("深度研究");
+    const deepResearchPill = new FakeElement(pill);
     const menuRows = [githubRow, deepResearchRow];
     const document = {
       querySelector: () => null,

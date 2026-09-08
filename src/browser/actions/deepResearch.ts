@@ -1267,7 +1267,7 @@ function buildActivateDeepResearchExpression(): string {
     };
     const isDeepResearchText = (text) => {
       const compact = compactText(text);
-      const exactLabel = targetLabels.some(label => text === label || text.startsWith(label + ' '));
+      const exactLabel = targetLabels.some(label => compact === compactText(label) || text.startsWith(label + ' '));
       const exactDescription = descriptionLabels.some(
         label => text === label || text.startsWith(label + ' ')
       );
