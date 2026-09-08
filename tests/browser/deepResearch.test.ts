@@ -502,6 +502,54 @@ describe("waitForResearchPlanAutoConfirm", () => {
     expect(mockLogger).toHaveBeenCalledWith(expect.stringContaining("execution started"));
   });
 
+  it.each(["frame", "parent fallback"])(
+    "promotes a captured plan when research starts through %s without plan text",
+    async (source) => {
+      mockRuntime.evaluate
+        .mockResolvedValueOnce({
+          result: {
+            value: {
+              completed: false,
+              inProgress: true,
+              researchStarted: false,
+              planTitle: "Support schedule",
+              planSteps: ["Read official sources"],
+              textLength: 40,
+            },
+          },
+        })
+        .mockResolvedValueOnce({
+          result: { value: source === "frame" ? { researchStarted: true } : null },
+        })
+        .mockResolvedValueOnce({ result: { value: { isResearching: true } } });
+      const Page = {
+        getFrameTree: vi.fn(async () => ({
+          frameTree: {
+            frame: { id: "main", url: "https://chatgpt.com/c/demo" },
+            childFrames: [
+              {
+                frame: {
+                  id: "deep",
+                  url: "https://connector_openai_deep_research.web-sandbox.oaiusercontent.com/",
+                },
+              },
+            ],
+          },
+        })),
+        createIsolatedWorld: vi.fn(async () => ({ executionContextId: 7 })),
+      };
+      const onPlan = vi.fn();
+      const plan = await waitForResearchPlanAutoConfirm(mockRuntime as never, mockLogger, 1_000, {
+        Page: Page as never,
+        onPlan,
+      });
+      expect(plan).toMatchObject({ title: "Support schedule", phase: "researching" });
+      expect(onPlan).toHaveBeenCalledTimes(2);
+      expect(onPlan.mock.calls[0]?.[0].phase).toBe("planning");
+      expect(onPlan.mock.calls[1]?.[0]).toEqual(plan);
+    },
+  );
+
   it("uses a captured target baseline when the fresh OOPIF owner is unavailable", async () => {
     const listeners = new Map<string, (params: unknown, sessionId?: string) => void>();
     const deepResearchUrl =

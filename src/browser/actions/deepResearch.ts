@@ -205,6 +205,15 @@ export async function waitForResearchPlanAutoConfirm(
     return next;
   };
 
+  const reportResearchStarted = async (): Promise<BrowserResearchPlanMetadata | null> => {
+    if (capturedPlan?.phase === "planning") {
+      capturedPlan = { ...capturedPlan, phase: "researching" };
+      await options?.onPlan?.(capturedPlan);
+    }
+    logger("[browser] Deep Research execution started; plan countdown is complete.");
+    return capturedPlan;
+  };
+
   // Phase A: Detect research plan appearance (up to 60s)
   const planDeadline = Date.now() + 60_000;
   let planDetected = false;
@@ -214,8 +223,7 @@ export async function waitForResearchPlanAutoConfirm(
     if (frameStatus) {
       await capturePlan(frameStatus);
       if (frameStatus.researchStarted) {
-        logger("[browser] Deep Research execution started; plan countdown is complete.");
-        return capturedPlan;
+        return reportResearchStarted();
       }
       if (capturedPlan) {
         planDetected = true;
@@ -262,8 +270,7 @@ export async function waitForResearchPlanAutoConfirm(
     if (frameStatus) {
       await capturePlan(frameStatus);
       if (frameStatus.researchStarted) {
-        logger("[browser] Deep Research execution started; plan countdown is complete.");
-        return capturedPlan;
+        return reportResearchStarted();
       }
     }
 
@@ -281,8 +288,7 @@ export async function waitForResearchPlanAutoConfirm(
     const val = result?.value as { isResearching?: boolean } | undefined;
 
     if (val?.isResearching) {
-      logger("[browser] Deep Research execution started; plan countdown is complete.");
-      return capturedPlan;
+      return reportResearchStarted();
     }
 
     await delay(2_000);
