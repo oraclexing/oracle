@@ -21,6 +21,7 @@ import {
 import {
   buildThinkingActivePredicateJsForTest,
   buildThinkingActivityDetailsPredicateJsForTest,
+  readThinkingActivity,
 } from "../../src/browser/actions/thinkingStatus.js";
 import { STOP_BUTTON_SELECTORS } from "../../src/browser/constants.js";
 import { FakeDocument, FakeElement } from "./domFixture.js";
@@ -345,7 +346,7 @@ describe("completion action correlation", () => {
     const status = { textContent: "Response complete" };
     const root = {
       querySelectorAll: (selector: string) => {
-        if (selector.includes('key$=":user"')) return [user];
+        if (selector.startsWith(':is([data-message-author-role="user"]')) return [user];
         if (selector.startsWith(".markdown")) return [answer];
         return [];
       },
@@ -358,7 +359,7 @@ describe("completion action correlation", () => {
         if (selector.includes('[data-testid^="conversation-turn"]')) {
           return [user, assistant];
         }
-        if (selector.includes('key$=":user"')) return [user];
+        if (selector.startsWith(':is([data-message-author-role="user"]')) return [user];
         if (selector === '[role="status"][aria-live="polite"]') return [status];
         return [];
       },
@@ -602,6 +603,7 @@ describe("classifyTurnTerminal", () => {
         stopVisible: partial.stopVisible ?? false,
         barVisible: partial.barVisible ?? false,
         strongThinkingActive: partial.strongThinkingActive ?? false,
+        thinkingKnown: partial.thinkingKnown ?? true,
       };
       const result = classifyTurnTerminal(state, sample, cfg);
       state = result.state;
@@ -741,6 +743,57 @@ describe("classifyTurnTerminal", () => {
       { len: 200, barVisible: true },
     ]);
     expect(out.some(Boolean)).toBe(false);
+  });
+
+  test("an unknown thinking read does not debounce a visible action bar", () => {
+    const unknown = { len: 800, barVisible: true, thinkingKnown: false };
+    const out = runGate([
+      { len: 800, stopVisible: true },
+      ...Array.from({ length: 8 }, () => unknown),
+      { len: 800, barVisible: true },
+    ]);
+    expect(out.some(Boolean)).toBe(false);
+  });
+
+  test("rebuilds the action-bar debounce after the thinking read recovers", () => {
+    const out = runGate([
+      { len: 800, barVisible: true, thinkingKnown: false },
+      { len: 800, barVisible: true, thinkingKnown: false },
+      { len: 800, barVisible: true },
+      { len: 800, barVisible: true },
+      { len: 800, barVisible: true },
+    ]);
+    expect(out.slice(0, 4).some(Boolean)).toBe(false);
+    expect(out.at(-1)).toBe(true);
+  });
+});
+
+describe("readThinkingActivity", () => {
+  test("a failed page read is unknown rather than idle", async () => {
+    const thrown = await readThinkingActivity({
+      evaluate: async () => {
+        throw new Error("cdp closed");
+      },
+    } as unknown as Parameters<typeof readThinkingActivity>[0]);
+    expect(thrown).toEqual({ active: false, strong: false, known: false });
+
+    const excepted = await readThinkingActivity({
+      evaluate: async () => ({
+        exceptionDetails: { text: "unavailable" },
+        result: { value: null },
+      }),
+    } as unknown as Parameters<typeof readThinkingActivity>[0]);
+    expect(excepted).toEqual({ active: false, strong: false, known: false });
+
+    const missing = await readThinkingActivity({
+      evaluate: async () => ({ result: { type: "undefined" } }),
+    } as unknown as Parameters<typeof readThinkingActivity>[0]);
+    expect(missing).toEqual({ active: false, strong: false, known: false });
+
+    const idle = await readThinkingActivity({
+      evaluate: async () => ({ result: { value: { active: false, strong: false } } }),
+    } as unknown as Parameters<typeof readThinkingActivity>[0]);
+    expect(idle).toEqual({ active: false, strong: false, known: true });
   });
 });
 

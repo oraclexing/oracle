@@ -14,7 +14,7 @@ Read this file whenever you're working from Windows and add new findings so the 
 
 Future Windows gotchas belong here. Update this doc when you learn something new.
 
-- Chinese ChatGPT can announce `回答已完成` and place localized copy controls outside the search unit inside a `data-talvt-turn-state` wrapper. Completion and Markdown capture must scope those controls to the current assistant exchange, excluding user messages and code blocks.
+- Chinese ChatGPT can announce `回答已完成` and place localized copy controls outside the search unit inside a `data-talvt-turn-state` wrapper. Completion and Markdown capture must scope those controls to the current assistant exchange. Keep user-message and code-block exclusions in the shared selector too: Deep Research queries it directly without the ordinary turn-action locator's guards.
 
 - Run focused Vitest suites with `node node_modules/vitest/vitest.mjs run ...` if the package-manager command cannot resolve the Windows executable shim in an automation environment.
 
