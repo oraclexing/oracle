@@ -431,6 +431,36 @@ describe("current ChatGPT search-unit action bars", () => {
       ]),
     ]);
 
+  function localizedExchange(
+    index: number,
+    answer: string,
+    finished: boolean,
+    copyLabel = "复制",
+  ): FakeElement {
+    return new FakeElement("div", { "data-content-search-turn-key": `fallback-turn-${index}` }, [
+      new FakeElement("div", { "data-talvt-turn-state": finished ? "complete" : "streaming" }, [
+        new FakeElement(
+          "div",
+          { "data-content-search-unit-key": `fallback-turn-${index}:0:user` },
+          [new FakeButton("复制消息", "user prompt")],
+        ),
+        new FakeElement(
+          "div",
+          { "data-content-search-unit-key": `fallback-turn-${index}:2:assistant` },
+          [
+            new FakeElement("div", { class: "MarkdownRoot" }, [
+              new FakeElement("p", {}, [], answer),
+              new FakeElement("pre", {}, [new FakeButton(copyLabel, "code block only")]),
+            ]),
+          ],
+        ),
+        ...(finished
+          ? [new FakeElement("div", {}, [new FakeButton(copyLabel, `## ${answer}`)])]
+          : []),
+      ]),
+    ]);
+  }
+
   const completion = (document: FakeDocument, minTurnIndex: number) =>
     new Script(buildCompletionVisibilityExpressionForTest({}, minTurnIndex)).runInContext(
       createContext({ Array, Boolean, String, HTMLElement: FakeElement, document }),
@@ -518,6 +548,30 @@ describe("current ChatGPT search-unit action bars", () => {
     await expect(copyMarkdown(document)).resolves.toMatchObject({
       success: true,
       markdown: "Legacy **answer**",
+    });
+  });
+
+  test.each(["复制", "Copy", "コピーする"])(
+    "captures the %s action beside a search unit in the current turn-state wrapper",
+    async (label) => {
+      const document = page(localizedExchange(0, "Finished answer", true, label));
+      expect(completion(document, 0)).toBe(true);
+      await expect(copyMarkdown(document)).resolves.toMatchObject({
+        success: true,
+        markdown: "## Finished answer",
+      });
+    },
+  );
+
+  test("does not accept user/code copy controls or an older localized answer as completion", async () => {
+    const document = page(
+      localizedExchange(0, "Old answer", true),
+      localizedExchange(1, "Streaming answer", false),
+    );
+    expect(completion(document, 2)).toBe(false);
+    await expect(copyMarkdown(document)).resolves.toMatchObject({
+      success: false,
+      status: "missing-button",
     });
   });
 });

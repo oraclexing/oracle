@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Browser: recognize Chinese completion announcements and localized controls beside search-unit replies while preserving current-turn and code-block guards.
+
 - CI: use Xcode 27 runners for macOS tests and release packaging while retaining the notifier's explicit macOS 13 deployment target.
 
 - Browser: add opt-in `--browser-no-focus` / `browser.noFocus` for background ChatGPT runs, attachment submission, and recovery; preserve foreground defaults, retain shared browser transports, and bring Chrome forward when sign-in or a challenge requires input; thanks @postoso and @Eotel.
